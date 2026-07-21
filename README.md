@@ -32,7 +32,7 @@ Client-Exchange-Simulation/
     communication_types.hpp  InboundMessage, OutboundMessage structs
     order_types.hpp  Primitive type aliases (Price, Quantity, OrderId, etc.)
     buffer.hpp      Header-only fixed-capacity byte buffer
-  bench.py        Automated multi-level latency benchmark
+  bench/          Python benchmark suite (throughput, latency, regression)
   CMakeLists.txt  Root build file
 ```
 
@@ -44,7 +44,7 @@ Client-Exchange-Simulation/
 - Linux (the server uses `epoll` and thread pinning via `pthread_setaffinity_np`)
 - GCC or Clang with C++23 support
 - CMake 3.25 or newer
-- Python 3.8 or newer (only needed for `bench.py`)
+- Python 3.9 or newer (only needed for the `bench/` suite)
 - An internet connection on first build (CMake fetches HdrHistogram_c via FetchContent)\
 
 **macOS / Windows (Docker):**
@@ -225,21 +225,37 @@ All compile-time configuration lives in header files. A rebuild is required afte
 
 ---
 
-## Automated benchmark
+## Benchmark suite (`bench/`)
 
-`bench.py` runs a multi-level latency benchmark at 250k, 1M, and 3.5M orders/s. For each level it collects 5 valid 15-second samples (discarding runs that fall outside a tolerance band), averages the HDR histogram percentiles across the valid samples, and prints a summary table.
+The `bench/` directory holds a small suite of Python benchmarks that build,
+launch, and drive the exchange/client pair for you. A shared harness
+(`bench/benchlib.py`) auto-detects the backend — it runs the **native** release
+binaries on Linux x86-64 (real latency) and otherwise falls back to **Docker**
+(functional throughput; latency is emulated and clearly flagged). Any compile-time
+knob a benchmark toggles (`EXPECTED_THROUGHPUT`, `DIAGNOSTICS`) is edited and then
+restored, guaranteed even on Ctrl-C. Results are printed as tables and written to
+`bench/results/` as CSV + JSON; raw per-run logs land in `bench/logs/`.
 
-The script requires the release binaries to already be built. It temporarily modifies `EXPECTED_THROUGHPUT` in `client/config/config.hpp`, rebuilds `client-release`, runs the pair, and restores the original value on exit regardless of whether it succeeds or fails.
+| Script | Measures |
+|---|---|
+| `saturation` | Peak sustained req/s and the plateau, sweeping client count (closed-loop) |
+| `latency_curve` | End-to-end latency percentiles vs offered load (supersedes the old `bench.py`) |
+| `stage_breakdown` | Per-stage latency histograms (`DIAGNOSTICS=1`) to locate the bottleneck |
+| `regression` | Fixed-seed run checked against a stored baseline — a CI gate |
+
+Run any of them as a module from the repo root:
 
 ```bash
-# Run with default 10 clients (native or inside a Docker/dev shell)
-python3 bench.py
-
-# Run with 20 clients
-python3 bench.py --clients 20
+python3 -m bench.saturation --clients 1,2,4,8,16,32 --duration 10
+python3 -m bench.latency_curve --levels 250000,1000000,3500000 --clients 10
+python3 -m bench.stage_breakdown --clients 16 --duration 20
+python3 -m bench.regression --update      # record a baseline, then re-run to check
 ```
 
-Per-run logs are written to `bench_logs/` for post-hoc inspection.
+Common flags: `--runner {auto,native,docker}`, `--duration`, `--seed`, `--no-build`.
+See `bench/README.md` for details. **Reliable latency numbers require native Linux
+x86-64** — under Docker on Apple Silicon the pipeline runs but latency figures are
+emulated (throughput remains meaningful).
 
 ---
 

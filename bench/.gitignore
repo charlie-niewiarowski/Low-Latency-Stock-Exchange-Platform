@@ -1,0 +1,4 @@
+# Benchmark run artifacts — regenerated on every run.
+results/
+logs/
+__pycache__/
