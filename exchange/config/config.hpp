@@ -13,6 +13,8 @@
 #define DIAGNOSTICS 0
 #define TESTING 0
 
+#define PREFETCH 1  // software prefetch hints on the hot path; set 0 to compile them out
+
 #define MIN_PRICE (1)           // the 100 is to include decimals since we are
 #define MAX_PRICE (1'000 * 100) // using uint32_t, so $10.25 = uint32_t(1025)
 

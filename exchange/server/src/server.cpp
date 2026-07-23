@@ -168,6 +168,10 @@ void Server::handleRequests() {
         }
 
         for (int i = 0; i < nfds; ++i) {
+            // Warm the next event's connection state (a ~2.3 KB fd-indexed object)
+            // while we read/parse the current fd.
+            if (i + 1 < nfds) prefetch_read(&inbound_map_[events_in_[i + 1].data.fd]);
+
             const int fd = events_in_[i].data.fd;
 
             if (fd == listen_sock.get()) {
@@ -306,6 +310,9 @@ void Server::serveResponses() {
         }
 
         for (int i = 0; i < nfds; ++i) {
+            // Warm the next event's outbound state (several KB) while we send this one.
+            if (i + 1 < nfds) prefetch_read(&outbound_map_[events_out_[i + 1].data.fd]);
+
             const int fd = events_out_[i].data.fd;
 
             if (condemned_inbound_[fd].load(std::memory_order_relaxed)) continue;
@@ -331,20 +338,40 @@ void Server::serveResponses() {
 }
 
 void Server::routeOutboundMessages() {
-    OutboundMessage msg{};
-    while (out_ring_.pop(msg)) {
-        const auto it = client_map_.find(msg.client_id);
-        if (it == client_map_.end()) continue;
-
+    // Resolve a message's destination fd (or -1). One client_map_ lookup per msg.
+    auto resolve = [this](const OutboundMessage& m) -> int {
+        const auto it = client_map_.find(m.client_id);
+        if (it == client_map_.end()) return -1;
         const int fd = it->second.load(std::memory_order_relaxed);
-        if (fd <= 0) continue;
-        if (condemned_inbound_[fd].load(std::memory_order_relaxed)) continue;
+        return fd > 0 ? fd : -1;
+    };
 
-        auto& ostate = outbound_map_[fd];
-        if (!ostate.has_value()) continue;
+    // 1-ahead pipeline: while routing the current message, prefetch the next
+    // destination's OutboundState (a multi-KB fd-indexed object). The overlap
+    // window is the next message's client_map_ lookup.
+    OutboundMessage cur{}, nxt{};
+    bool have = out_ring_.pop(cur);
+    int cur_fd = have ? resolve(cur) : -1;
+    if (cur_fd > 0) prefetch_read(&outbound_map_[cur_fd]);
 
-        ostate->push_outbound(msg);
-        writable_fds_.insert(fd);
+    while (have) {
+        have = out_ring_.pop(nxt);
+        int nxt_fd = -1;
+        if (have) {
+            nxt_fd = resolve(nxt);
+            if (nxt_fd > 0) prefetch_read(&outbound_map_[nxt_fd]);
+        }
+
+        if (cur_fd > 0 && !condemned_inbound_[cur_fd].load(std::memory_order_relaxed)) {
+            auto& ostate = outbound_map_[cur_fd];
+            if (ostate.has_value()) {
+                ostate->push_outbound(cur);
+                writable_fds_.insert(cur_fd);
+            }
+        }
+
+        cur = nxt;
+        cur_fd = nxt_fd;
     }
 
     // Drain inbound-generated errors (SPSC: inbound produces, we consume).
@@ -366,6 +393,10 @@ void Server::routeOutboundMessages() {
 
 void Server::beginSends() {
     for (auto it = writable_fds_.begin(); it != writable_fds_.end(); ) {
+        // Warm the next writable fd's outbound state while we append/send this one.
+        auto nxt = it; ++nxt;
+        if (nxt != writable_fds_.end()) prefetch_read(&outbound_map_[*nxt]);
+
         const int fd = *it;
 
         if (condemned_inbound_[fd].load(std::memory_order_relaxed)) {

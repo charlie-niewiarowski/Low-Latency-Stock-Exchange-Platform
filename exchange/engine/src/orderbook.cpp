@@ -8,6 +8,7 @@
 #include <algorithm>
 
 #include "../include/orderbook.hpp"
+#include "lib.hpp"
 
 #if LOGGING
 #include <iostream>
@@ -55,6 +56,37 @@ ProcessResult Orderbook::process(const OrderRequest& req) {
             std::cerr << "orderbook: request with unknown type\n";
             #endif
             return { Status::FAILURE, false };
+    }
+}
+
+//=============================================================================
+// prefetch() — warm the structures the next request will touch
+//=============================================================================
+
+void Orderbook::prefetch(const InboundMessage& next) const {
+    switch (next.message_type) {
+        case MessageType::NEW: {
+            // The price ladder is a ~2.4 MB sparse array indexed by tick; warm the
+            // slot the add will hit. Guard the index (prefetch never faults, but
+            // keep the pointer in-bounds).
+            if (next.price < MIN_PRICE || next.price > MAX_PRICE) return;
+            const size_t idx = next.price - MIN_PRICE;
+            prefetch_read(next.side == Side::BID ? &bids_[idx] : &asks_[idx]);
+            break;
+        }
+        case MessageType::CANCEL:
+        case MessageType::MODIFY: {
+            // std::unordered_map exposes only the bucket index, so this is an
+            // early-touch of the bucket's first node rather than a pure async
+            // prefetch (see the plan's map-node caveat).
+            if (orders_.bucket_count() == 0) return;
+            const size_t b = orders_.bucket(next.order_id);
+            const auto lit = orders_.begin(b);
+            if (lit != orders_.end(b)) prefetch_read(&*lit);
+            break;
+        }
+        default:
+            break;
     }
 }
 

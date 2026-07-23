@@ -71,6 +71,11 @@ public:
     // Route point: apply a single request to the book.
     ProcessResult process(const OrderRequest& req);
 
+    // Software prefetch: warm the structures the next request will touch (the
+    // price-level slot for NEW, the orders_ bucket for CANCEL/MODIFY) while the
+    // current request is still being processed.
+    void prefetch(const InboundMessage& next) const;
+
 #if LOGGING
     // Drain a trade produced by matching (consumed by the Engine's expose thread).
     bool pop_trade(Trade& t) { return trades_ring_.pop(t); }

@@ -59,12 +59,25 @@ void Engine::step() {
 // run() Helper Suite
 //=============================================================================
 void Engine::handleMatching() {
-    InboundMessage msg{};
+    // 1-ahead pipeline: grab the next request and prefetch the book structures it
+    // will touch while we process the current one, hiding the price-ladder /
+    // orders_ miss behind the current request's work.
+    InboundMessage cur{}, nxt{};
+    bool have = false;
 
     while (!stop_.load(std::memory_order_relaxed)) {
-        if (in_ring_.pop(msg)) {
-            executeRequest(msg);
+        if (!have) {
+            have = in_ring_.pop(cur);
+            if (!have) continue;
         }
+
+        const bool have_next = in_ring_.pop(nxt);
+        if (have_next) book_.prefetch(nxt);
+
+        executeRequest(cur);
+
+        if (have_next) { cur = nxt; have = true; }
+        else            have = false;
     }
 }
 
