@@ -4,6 +4,12 @@ A low-latency order exchange simulation written in C++23. It consists of two sep
 
 ---
 
+## Disclaimer
+
+DISCLAIMER, the latency benchmarks may not be accurate at the moment as I do not have access to a Linux system. The last tested commit should be 7db090536f36ae9112bc3f369f89384e58b3bdb0
+
+---
+
 ## Overview
 
 The exchange processes three order operations: NEW, CANCEL, and MODIFY. It supports both LIMIT and MARKET order types. On shutdown the exchange prints HDR histogram latency data covering the full round-trip as well as each internal segment (recv syscall, ring transit, engine processing, send syscall, and so on).
