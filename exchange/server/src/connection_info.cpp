@@ -6,6 +6,6 @@
 
 OutboundMessage OutboundState::pop_outbound() {
     OutboundMessage msg{};
-    staging_.pop(msg);
+    if (staging_.pop(msg)) --pending_count_;
     return msg;
 }

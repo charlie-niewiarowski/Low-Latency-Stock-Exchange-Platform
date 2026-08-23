@@ -31,17 +31,22 @@ inline void prefetch_write(const void*) {}
 #endif
 
 inline void pin_to_core(const int core) {
+    // pthread_* functions return the error number directly on failure (0 on
+    // success) — they do NOT follow the errno/-1 syscall convention, so the
+    // return value itself (not errno) is what strerror() needs here.
     cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);
     CPU_SET(core, &cpu_set);
-    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set) == -1) {
-        std::cerr << "pthread_setaffinity_np failed: " << strerror(errno) << std::endl;
+    if (const int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set); rc != 0) {
+        std::cerr << "pthread_setaffinity_np failed: " << strerror(rc) << std::endl;
     }
 
     sched_param param{};
     param.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) == -1) {
-        std::cerr << "pthread_setschedparam failed: " << strerror(errno) << std::endl;
+    if (const int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &param); rc != 0) {
+        std::cerr << "pthread_setschedparam failed: " << strerror(rc)
+                   << " (needs CAP_SYS_NICE or a raised RLIMIT_RTPRIO; falling back to SCHED_OTHER)"
+                   << std::endl;
     }
 }
 

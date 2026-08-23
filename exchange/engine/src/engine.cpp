@@ -58,6 +58,8 @@ void Engine::step() {
 //=============================================================================
 // run() Helper Suite
 //=============================================================================
+static std::atomic<uint64_t> g_dbg_iters_match{0};
+
 void Engine::handleMatching() {
     // 1-ahead pipeline: grab the next request and prefetch the book structures it
     // will touch while we process the current one, hiding the price-ladder /
@@ -66,6 +68,7 @@ void Engine::handleMatching() {
     bool have = false;
 
     while (!stop_.load(std::memory_order_relaxed)) {
+        g_dbg_iters_match.fetch_add(1, std::memory_order_relaxed);
         if (!have) {
             have = in_ring_.pop(cur);
             if (!have) continue;
@@ -79,6 +82,7 @@ void Engine::handleMatching() {
         if (have_next) { cur = nxt; have = true; }
         else            have = false;
     }
+    std::cerr << "DBG handleMatching total iterations=" << g_dbg_iters_match.load() << "\n";
 }
 
 #if LOGGING

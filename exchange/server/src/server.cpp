@@ -15,6 +15,8 @@
 #include <fcntl.h>
 
 static LatencyHandler latency_handler;
+static std::atomic<uint64_t> g_dbg_iters{0};
+static std::atomic<uint64_t> g_dbg_iters_in{0};
 
 #define ever (;;)
 
@@ -34,6 +36,21 @@ Server::Server(InboundRing& in, OutboundRing& out, std::atomic<bool>& stop)
 }
 
 Server::~Server() {
+    // Join both worker threads before touching epoll_in_/epoll_out_: they're
+    // declared before the epoll fds, so plain member destruction would close
+    // the fds first and only join the threads afterward, racing an in-flight
+    // epoll_wait() against this destructor's close() (observed in practice as
+    // "epoll_wait error: Bad file descriptor" on shutdown). By the time this
+    // destructor runs, stop_ is already true (the caller only tears down the
+    // Server after signalling stop), so both loops are on their way out —
+    // this just waits for them to actually get there before closing the fds
+    // they're still polling.
+    if (inbound_thread_.joinable())  inbound_thread_.join();
+    if (outbound_thread_.joinable()) outbound_thread_.join();
+
+    std::cerr << "DBG serveResponses total iterations=" << g_dbg_iters.load() << "\n";
+    std::cerr << "DBG handleRequests total iterations=" << g_dbg_iters_in.load() << "\n";
+
     if (epoll_in_  != -1) close(epoll_in_);
     if (epoll_out_ != -1) close(epoll_out_);
 }
@@ -156,6 +173,7 @@ void Server::handleRequests() {
     const EpollSocket listen_sock{std::move(socket_setup.value())};
 
     while (!stop_.load(std::memory_order_relaxed)) {
+        g_dbg_iters_in.fetch_add(1, std::memory_order_relaxed);
         handleDisconnectsInbound();
 
         const int nfds = epoll_wait(epoll_in_, events_in_, MAX_CLIENTS, 0);
@@ -261,7 +279,8 @@ void Server::processRequest(InboundState& state) {
         const char* data = buf.view().data();
         constexpr size_t header_len = sizeof("EXCHANGE\n") - 1;
         if (memcmp(data, "EXCHANGE\n", header_len) != 0) {
-            error_channel_.push({fd, ServerError::MALFORMED_REQUEST});
+            PendingError pe{fd, ServerError::MALFORMED_REQUEST};
+            error_channel_.push(pe);
             buf.advance(INBOUND_BSIZE);
             continue;
         }
@@ -275,7 +294,8 @@ void Server::processRequest(InboundState& state) {
         buf.advance(INBOUND_BSIZE);
 
         if (!validate_message(msg)) {
-            error_channel_.push({fd, ServerError::INVALID_ORDER});
+            PendingError pe{fd, ServerError::INVALID_ORDER};
+            error_channel_.push(pe);
             continue;
         }
 
@@ -288,7 +308,7 @@ void Server::processRequest(InboundState& state) {
         auto [it, inserted] = client_map_.try_emplace(cid, fd);
         if (!inserted) it->second.store(fd, std::memory_order_relaxed);
 
-        in_ring_.push(state.inbound());
+        in_ring_.push(msg);
     }
 }
 
@@ -298,6 +318,7 @@ void Server::processRequest(InboundState& state) {
 
 void Server::serveResponses() {
     while (!stop_.load(std::memory_order_relaxed)) {
+        g_dbg_iters.fetch_add(1, std::memory_order_relaxed);
         handleDisconnectsOutbound();
         routeOutboundMessages();
         beginSends();

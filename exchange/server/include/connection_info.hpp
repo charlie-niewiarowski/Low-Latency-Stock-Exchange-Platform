@@ -93,9 +93,11 @@ public:
 
     WriteBuffer& write_buffer() { return write_buf_; }
 
-    void push_outbound(const OutboundMessage& msg) { staging_.push(msg); }
+    void push_outbound(OutboundMessage msg) {
+        if (staging_.push(msg)) ++pending_count_;
+    }
     OutboundMessage pop_outbound();
-    [[nodiscard]] bool has_pending_outbound() const { return !staging_.empty(); }
+    [[nodiscard]] bool has_pending_outbound() const { return pending_count_ > 0; }
 
     void push_latency(const PendingLatency& e) {
         if (latency_count_ < static_cast<int>(latency_batch_.size()))
@@ -109,6 +111,8 @@ private:
     WriteBuffer write_buf_;
     // Single-threaded staging buffer; StagingQueue's atomics have no contention.
     StagingQueue staging_{RINGBUF_SIZE};
+    // RingBuffer no longer exposes empty()/size(); track pending count ourselves.
+    int pending_count_{0};
 
     std::array<PendingLatency, PIPELINE_DEPTH> latency_batch_{};
     int latency_count_{0};

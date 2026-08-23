@@ -90,6 +90,14 @@ int main(const int argc, char* argv[]) {
     if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set) != 0)
         std::fprintf(stderr, "[WARN] pthread_setaffinity_np: %s\n", std::strerror(errno));
 
+    // DEBUG: testing whether client-side SCHED_OTHER scheduling latency is
+    // gating round-trip throughput (the exchange side alone was confirmed
+    // not to be the bottleneck — its threads spin at millions of iters/sec).
+    sched_param sp{};
+    sp.sched_priority = sched_get_priority_max(SCHED_FIFO);
+    if (const int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp); rc != 0)
+        std::fprintf(stderr, "[WARN] pthread_setschedparam: %s\n", std::strerror(rc));
+
     const uint64_t t0 = now_ns();
     orch.run();
     const uint64_t t1 = now_ns();

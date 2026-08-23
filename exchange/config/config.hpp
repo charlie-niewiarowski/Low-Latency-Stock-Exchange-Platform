@@ -10,7 +10,7 @@
 //=============================================================================
 
 #define LOGGING 0
-#define DIAGNOSTICS 0
+#define DIAGNOSTICS 1
 #define TESTING 0
 
 #define PREFETCH 1  // software prefetch hints on the hot path; set 0 to compile them out
@@ -38,7 +38,7 @@
 
 #define RINGBUF_SIZE 64 // per-connection outbound staging ring capacity (must be a power of two)
 
-#define LATENCY_SAMPLE_DROP 100'000 // gets rid of cold start's influence
-#define LATENCY_SAMPLE_COUNT (100'000'000 + LATENCY_SAMPLE_DROP) // despite skipping the first X samples we still
+#define LATENCY_SAMPLE_DROP 5
+#define LATENCY_SAMPLE_COUNT (2000 + LATENCY_SAMPLE_DROP)
                                                               // get the desired number of samples
 #endif //UNTITLED_MACROS_H
