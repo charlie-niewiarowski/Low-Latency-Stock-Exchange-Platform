@@ -2,7 +2,7 @@
 .cache
 .venv
 build
-client/build
-exchange/build
+src/client/build
+src/exchange/build
 bench/results
 bench/logs

@@ -52,7 +52,7 @@ LOGS_DIR      = BENCH_DIR / "logs"
 BASELINES_DIR = BENCH_DIR / "baselines"
 
 # ---------------------------------------------------------------------------
-# latency-output vocabulary (must match exchange/server/include/latency.hpp)
+# latency-output vocabulary (must match src/exchange/server/include/latency.hpp)
 # ---------------------------------------------------------------------------
 
 PCTS = ["p50", "p90", "p99", "p99.9", "p99.99", "max"]

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 
-from bench import benchlib as bl
+from src.bench import benchlib as bl
 
 
 def main() -> None:

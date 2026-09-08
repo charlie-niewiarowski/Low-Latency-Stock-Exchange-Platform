@@ -166,7 +166,7 @@ static void mode_op(uint32_t capacity, uint64_t iters, uint64_t warmup, int cpu)
     for (uint64_t i = 0; i < warmup; ++i) {
         item.seq = i;
         (void)ring.push(item); // capacity guarantees success (never > 1 item queued)
-        (void)ring.pop(out);
+        out = *ring.pop();
     }
 
     std::vector<int64_t> push_ticks(iters), pop_ticks(iters), rt_ticks(iters);
@@ -183,7 +183,7 @@ static void mode_op(uint32_t capacity, uint64_t iters, uint64_t warmup, int cpu)
         asm volatile("" ::: "memory");
         const uint64_t t2 = tsc_begin();
         asm volatile("" ::: "memory");
-        (void)ring.pop(out);
+        out = *ring.pop(); // same-thread push-then-pop: capacity guarantees success
         asm volatile("" ::: "memory");
         const uint64_t t3 = tsc_end();
 
@@ -304,12 +304,14 @@ static void mode_spsc(uint32_t capacity, uint64_t iters, uint64_t warmup,
 
         Payload out{};
         for (uint64_t i = 0; i < warmup; ++i) {
-            while (!ring.pop(out)) {}
+            std::optional<Payload> v;
+            while (!(v = ring.pop())) {}
+            out = *v;
         }
         const int64_t off = offset_ticks.load(std::memory_order_relaxed);
         for (uint64_t i = 0; i < iters; ++i) {
             for (;;) {
-                if (ring.pop(out)) break;
+                if (auto v = ring.pop()) { out = *v; break; }
             }
             asm volatile("" ::: "memory");
             const uint64_t t1 = tsc_end();
@@ -389,7 +391,9 @@ static void mode_sat(uint32_t capacity, uint64_t iters, int producer_cpu, int co
 
         Payload out{};
         for (uint64_t i = 0; i < iters; ++i) {
-            while (!ring.pop(out)) {}
+            std::optional<Payload> v;
+            while (!(v = ring.pop())) {}
+            out = *v;
         }
         t_end = std::chrono::steady_clock::now();
     });

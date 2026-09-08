@@ -22,23 +22,30 @@ The client opens N concurrent TCP connections and keeps each one pipelined with 
 
 ```
 Client-Exchange-Simulation/
-  exchange/
-    app/          Exchange entry point and top-level Exchange class
-    engine/       Matching engine (order book, matching logic, tests)
-    server/       TCP gateway (epoll inbound/outbound threads, tests)
-    include/      Shared lock-free ring buffer
-    config/       exchange/config/config.hpp  -- all compile-time knobs
-  client/
-    app/          Client entry point
-    src/          LoadGenerator (epoll event loop)
-    include/      ClientState, LoadGenerator, OrderFactory
-    config/       client/config/config.hpp  -- all compile-time knobs
-  infra/          Wire types used by both programs
-    protocol.hpp    Frame sizes, status prefixes, error strings
-    communication_types.hpp  InboundMessage, OutboundMessage structs
-    order_types.hpp  Primitive type aliases (Price, Quantity, OrderId, etc.)
-    buffer.hpp      Header-only fixed-capacity byte buffer
+  src/
+    exchange/
+      app/          Exchange entry point and top-level Exchange class
+      engine/       Matching engine (order book, matching logic)
+      server/       TCP gateway (epoll inbound/outbound threads)
+      config/       src/exchange/config/config.hpp  -- all compile-time knobs
+    client/
+      app/          Client entry point
+      src/          LoadGenerator (epoll event loop)
+      include/      ClientState, LoadGenerator, OrderFactory
+      config/       src/client/config/config.hpp  -- all compile-time knobs
+    infra/          Wire types + hot-path primitives shared by both programs
+                    (dependency-free by design, so it can be lifted into a
+                    separate repo for future trading systems without touching
+                    exchange/ or client/)
+      protocol.hpp    Frame sizes, status prefixes, error strings
+      communication_types.hpp  InboundMessage, OutboundMessage structs
+      order_types.hpp  Primitive type aliases (Price, Quantity, OrderId, etc.)
+      buffer.hpp      Header-only fixed-capacity byte buffer
+      ring_buffer.hpp Lock-free SPSC ring buffer
+      perf.hpp        Software prefetch hints + thread/core pinning helpers
+  tests/          Unit/integration tests, mirroring src/'s layout (see Tests below)
   bench/          Python benchmark suite (throughput, latency, regression)
+  docs/           Standalone design/change-log notes
   CMakeLists.txt  Root build file
 ```
 
@@ -193,7 +200,7 @@ docker exec -it sim bash
 
 All compile-time configuration lives in header files. A rebuild is required after changes.
 
-### Exchange: `exchange/config/config.hpp`
+### Exchange: `src/exchange/config/config.hpp`
 
 | Macro | Default | Description |
 |---|---|---|
@@ -212,7 +219,7 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | `LATENCY_SAMPLE_COUNT` | `100000000` | How many samples to collect before stopping |
 | `LATENCY_SAMPLE_DROP` | `100000` | Cold-start samples to discard before recording |
 
-### Client: `client/config/config.hpp`
+### Client: `src/client/config/config.hpp`
 
 | Macro | Default | Description |
 |---|---|---|
@@ -329,4 +336,12 @@ Rate limiting is controlled by `EXPECTED_THROUGHPUT`: when set to a non-zero val
 
 ## Tests
 
-Test files exist under `exchange/engine/tests/` and `exchange/server/tests/` but are not actively maintained and may be out of date. They are guarded by `#define TESTING 1` in `exchange/config/config.hpp`.
+Test files live under `tests/exchange/engine/` and `tests/exchange/server/`, mirroring `src/exchange/`'s layout, and are wired into CMake as four targets: `engine-tests`, `validation-tests`, `integration-tests`, `server-pipeline-tests` (`TESTING` is compiled to `1` for these targets specifically via `target_compile_definitions`, independent of the `src/exchange/config/config.hpp` default of `0`).
+
+**They are not actively maintained and currently fail to compile** against the current engine/server API — confirmed while wiring them into CMake for this reorg. Known breakage, in case someone picks this up:
+- `test_validation.cpp` / `test_integration.cpp` / `test_server_pipeline.cpp` build `InboundMessage` with old positional initializers; the struct has since grown three leading `Timestamp` fields and no longer matches that shape.
+- `test_server_pipeline.cpp` also references `err_invalid_order` / `err_malformed_request` helpers that no longer exist.
+- `server_fixture.hpp` calls a public `Server::stop()` that isn't public anymore (`stop_` is now a private reference into a shared atomic, part of the two-phase close protocol).
+- `engine_test.cpp` needs `Engine::pop_trade()` → `Orderbook::pop_trade()`, but that accessor is gated `#if LOGGING`, not `#if TESTING`, so it doesn't exist in a `TESTING=1, LOGGING=0` build.
+
+`engine-tests` only needs `src/exchange/engine/{include,src}`; the three server-side targets additionally link `hdr_histogram_static` (pulled in transitively by `latency.hpp`).

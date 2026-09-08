@@ -4,9 +4,9 @@ ring_buffer.py — RingBuffer<T> push/pop latency + throughput microbenchmark.
 
 Unlike the rest of bench/, this does not drive the TCP exchange/client pair.
 It builds and runs bench/cpp/ring-buffer-bench, a small standalone C++ harness
-(bench/cpp/ring_buffer_bench.cpp) that links exchange/include/ring_buffer.hpp
+(bench/cpp/ring_buffer_bench.cpp) that links src/infra/ring_buffer.hpp
 directly and times push()/pop() with RDTSC — the same primitive
-exchange/server/include/latency.hpp uses on the real hot path.
+src/exchange/server/include/latency.hpp uses on the real hot path.
 
 Three modes:
 
@@ -53,7 +53,7 @@ import re
 import subprocess
 import sys
 
-from bench import benchlib as bl
+from src.bench import benchlib as bl
 
 BENCH_BIN = bl.BUILD_DIR / "bench" / "cpp" / "ring-buffer-bench"
 
