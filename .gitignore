@@ -1,4 +1,6 @@
 .idea
+.cache
+.venv
 build
 client/build
 exchange/build
