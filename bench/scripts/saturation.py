@@ -11,7 +11,7 @@ Process manipulation: runtime argument only (client count). The client is rebuil
 once only if EXPECTED_THROUGHPUT is not already 0 (then restored). No exchange
 rebuild.
 
-    python3 -m bench.saturation --clients 1,2,4,8,16,32 --duration 10 --samples 3
+    python3 -m bench.scripts.saturation --clients 1,2,4,8,16,32 --duration 10 --samples 3
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 
-from src.bench import benchlib as bl
+from bench.scripts import benchlib as bl
 
 
 def main() -> None:

@@ -1,11 +1,11 @@
 //
 // ring_buffer_bench.cpp — standalone push/pop latency + throughput harness for
-// exchange/include/ring_buffer.hpp, driven by bench/ring_buffer.py.
+// src/infra/ring_buffer.hpp, driven by bench/scripts/ring_buffer.py.
 //
 // This does NOT go through the TCP client/exchange pair the rest of bench/
 // drives — it links RingBuffer<T> directly and times push()/pop() with RDTSC,
-// the same primitive exchange/server/include/latency.hpp uses on the real hot
-// path. Three modes (see usage()):
+// the same primitive src/exchange/server/include/latency.hpp uses on the real
+// hot path. Three modes (see usage()):
 //
 //   op    same-thread push-then-pop; no cross-core effects at all.
 //   spsc  producer/consumer pinned to separate physical cores, mirroring how
@@ -44,6 +44,7 @@
 
 #include <hdr/hdr_histogram.h>
 
+#include "args.hpp"
 #include "ring_buffer.hpp"
 
 //=============================================================================
@@ -418,15 +419,10 @@ static void usage(const char* argv0) {
         "          [--producer-cpu N] [--consumer-cpu N] [--rate N]\n", argv0);
 }
 
-static uint64_t arg_u64(int argc, char** argv, const char* name, uint64_t dflt) {
-    for (int i = 2; i + 1 < argc; ++i)
-        if (std::strcmp(argv[i], name) == 0) return std::strtoull(argv[i + 1], nullptr, 10);
-    return dflt;
-}
-
 int main(int argc, char** argv) {
     if (argc < 2) { usage(argv[0]); return 1; }
     const std::string mode = argv[1];
+    using bench_harness::arg_u64;
 
     const auto capacity     = static_cast<uint32_t>(arg_u64(argc, argv, "--capacity", 524288));
     const auto warmup       = arg_u64(argc, argv, "--warmup", 50'000);

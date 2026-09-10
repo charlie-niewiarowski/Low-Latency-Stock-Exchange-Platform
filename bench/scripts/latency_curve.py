@@ -13,14 +13,14 @@ level). The exchange is untouched (its always-on end-to-end histogram needs no
 DIAGNOSTICS). Use --diagnostics to additionally capture per-stage histograms
 (rebuilds the exchange too — see stage_breakdown.py for a focused version).
 
-    python3 -m bench.latency_curve --levels 250000,1000000,3500000 --clients 10
+    python3 -m bench.scripts.latency_curve --levels 250000,1000000,3500000 --clients 10
 """
 
 from __future__ import annotations
 
 import argparse
 
-from src.bench import benchlib as bl
+from bench.scripts import benchlib as bl
 
 
 def main() -> None:

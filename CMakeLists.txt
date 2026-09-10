@@ -19,9 +19,10 @@ add_subdirectory(src/exchange exchange)
 # Load-generator client. Same binary-dir pinning rationale as above.
 add_subdirectory(src/client client)
 
-# Standalone RingBuffer<T> microbenchmark (bench/ring_buffer.py); after
-# exchange/ so it can link the hdr_histogram_static target fetched there.
-add_subdirectory(bench/cpp)
+# Benchmark executables (bench/executables/, driven by bench/scripts/*.py);
+# after exchange/ so ring-buffer-bench can link the hdr_histogram_static
+# target fetched there, and orderbook-bench can reuse the "config" target.
+add_subdirectory(bench/executables)
 
 # Unit/integration tests; after exchange/ for the same hdr_histogram_static reason.
 add_subdirectory(tests)

@@ -3,8 +3,8 @@
 ring_buffer.py — RingBuffer<T> push/pop latency + throughput microbenchmark.
 
 Unlike the rest of bench/, this does not drive the TCP exchange/client pair.
-It builds and runs bench/cpp/ring-buffer-bench, a small standalone C++ harness
-(bench/cpp/ring_buffer_bench.cpp) that links src/infra/ring_buffer.hpp
+It builds and runs bench/executables/ring-buffer-bench, a small standalone C++
+harness (bench/executables/ring_buffer_bench.cpp) that links src/infra/ring_buffer.hpp
 directly and times push()/pop() with RDTSC — the same primitive
 src/exchange/server/include/latency.hpp uses on the real hot path.
 
@@ -39,9 +39,9 @@ Measurement hygiene, and why you should trust (or distrust) a given run:
 Native Linux x86-64 only (raw RDTSC + core affinity); does not use
 benchlib's Docker runner.
 
-    python3 -m bench.ring_buffer op
-    python3 -m bench.ring_buffer spsc --capacity 524288 --iters 2000000
-    python3 -m bench.ring_buffer sat --iters 5000000
+    python3 -m bench.scripts.ring_buffer op
+    python3 -m bench.scripts.ring_buffer spsc --capacity 524288 --iters 2000000
+    python3 -m bench.scripts.ring_buffer sat --iters 5000000
 """
 
 from __future__ import annotations
@@ -53,9 +53,9 @@ import re
 import subprocess
 import sys
 
-from src.bench import benchlib as bl
+from bench.scripts import benchlib as bl
 
-BENCH_BIN = bl.BUILD_DIR / "bench" / "cpp" / "ring-buffer-bench"
+BENCH_BIN = bl.BUILD_DIR / "bench" / "executables" / "ring-buffer-bench"
 
 X86 = {"x86_64", "amd64", "AMD64"}
 

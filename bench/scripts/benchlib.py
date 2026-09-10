@@ -13,7 +13,7 @@ Responsibilities:
   * parse the client "=== Stats ===" block and the exchange HDR histograms,
   * aggregate and emit results as console tables plus CSV/JSON.
 
-The individual bench/*.py scripts build on these primitives.
+The individual bench/scripts/*.py scripts build on these primitives.
 """
 
 from __future__ import annotations
@@ -38,14 +38,15 @@ from pathlib import Path
 # paths
 # ---------------------------------------------------------------------------
 
-BENCH_DIR    = Path(__file__).resolve().parent
+SCRIPTS_DIR  = Path(__file__).resolve().parent
+BENCH_DIR    = SCRIPTS_DIR.parent
 REPO_ROOT    = BENCH_DIR.parent
 BUILD_DIR    = Path(os.environ.get("BENCH_BUILD_DIR", REPO_ROOT / "build"))
 EXCHANGE_BIN = BUILD_DIR / "exchange" / "exchange-release"
 CLIENT_BIN   = BUILD_DIR / "client"   / "client-release"
 
-EXCHANGE_CFG = REPO_ROOT / "exchange" / "config" / "config.hpp"
-CLIENT_CFG   = REPO_ROOT / "client"   / "config" / "config.hpp"
+EXCHANGE_CFG = REPO_ROOT / "src" / "exchange" / "config" / "config.hpp"
+CLIENT_CFG   = REPO_ROOT / "src" / "client"   / "config" / "config.hpp"
 
 RESULTS_DIR   = BENCH_DIR / "results"
 LOGS_DIR      = BENCH_DIR / "logs"

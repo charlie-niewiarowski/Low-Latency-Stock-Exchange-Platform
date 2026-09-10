@@ -8,8 +8,8 @@ throughput against a committed baseline and checks functional invariants
 gate. Baselines are keyed by runner type (native vs docker) because the absolute
 numbers differ across environments.
 
-    python3 -m bench.regression --update              # write/refresh the baseline
-    python3 -m bench.regression                       # check against baseline
+    python3 -m bench.scripts.regression --update              # write/refresh the baseline
+    python3 -m bench.scripts.regression                       # check against baseline
 
 Process manipulation: none permanent — closed-loop by default (or --load sets and
 restores EXPECTED_THROUGHPUT). Deterministic --seed keeps runs comparable.
@@ -22,7 +22,7 @@ import json
 import sys
 from contextlib import nullcontext
 
-from src.bench import benchlib as bl
+from bench.scripts import benchlib as bl
 
 
 def main() -> int:

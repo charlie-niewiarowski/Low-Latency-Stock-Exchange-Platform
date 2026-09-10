@@ -12,14 +12,14 @@ Process manipulation: edit-and-restore DIAGNOSTICS (both configs, both rebuilds)
 optional EXPECTED_THROUGHPUT via --load (0 = closed-loop, the default, to push
 enough traffic past the 100k warm-up drop).
 
-    python3 -m bench.stage_breakdown --clients 16 --duration 20
+    python3 -m bench.scripts.stage_breakdown --clients 16 --duration 20
 """
 
 from __future__ import annotations
 
 import argparse
 
-from src.bench import benchlib as bl
+from bench.scripts import benchlib as bl
 
 
 def main() -> None:

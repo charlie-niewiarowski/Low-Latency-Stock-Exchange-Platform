@@ -259,10 +259,10 @@ restored, guaranteed even on Ctrl-C. Results are printed as tables and written t
 Run any of them as a module from the repo root:
 
 ```bash
-python3 -m bench.saturation --clients 1,2,4,8,16,32 --duration 10
-python3 -m bench.latency_curve --levels 250000,1000000,3500000 --clients 10
-python3 -m bench.stage_breakdown --clients 16 --duration 20
-python3 -m bench.regression --update      # record a baseline, then re-run to check
+python3 -m bench.scripts.saturation --clients 1,2,4,8,16,32 --duration 10
+python3 -m bench.scripts.latency_curve --levels 250000,1000000,3500000 --clients 10
+python3 -m bench.scripts.stage_breakdown --clients 16 --duration 20
+python3 -m bench.scripts.regression --update      # record a baseline, then re-run to check
 ```
 
 Common flags: `--runner {auto,native,docker}`, `--duration`, `--seed`, `--no-build`.
