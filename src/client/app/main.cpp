@@ -6,7 +6,7 @@
 // Usage:
 //   client [num_clients] [rng_seed]
 //
-//   num_clients  – concurrent TCP connections to open (default: 10)
+//   num_clients  – concurrent TCPHeader connections to open (default: 10)
 //   rng_seed     – optional RNG seed for reproducibility (default: random)
 //
 // Runs until SIGINT / SIGTERM, then prints aggregate stats and throughput.

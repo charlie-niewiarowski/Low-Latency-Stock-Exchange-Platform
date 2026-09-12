@@ -12,7 +12,6 @@
 #ifndef UNTITLED_TYPES_H
 #define UNTITLED_TYPES_H
 
-#include "order_types.hpp"
 #include "communication_types.hpp"
 
 class OrderRequest {

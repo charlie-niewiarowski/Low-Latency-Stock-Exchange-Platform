@@ -79,8 +79,9 @@ public:
     // current request is still being processed.
     void prefetch(const InboundMessage& next) const;
 
-#if LOGGING
-    // Drain a trade produced by matching (consumed by the Engine's expose thread).
+#if LOGGING || TESTING
+    // Drain a trade produced by matching (consumed by the Engine's expose thread,
+    // and by engine-tests, which builds with TESTING=1 but LOGGING=0).
     [[nodiscard]] std::optional<Trade> pop_trade() { return trades_ring_.pop(); }
 #endif
 
@@ -107,7 +108,7 @@ private:
 
     //===== output ======
     OutboundRing& out_ring_;   // MATCH fills are pushed here
-#if LOGGING
+#if LOGGING || TESTING
     RingBuffer<Trade> trades_ring_{TRADE_RING_COUNT};
 #endif
 
@@ -128,7 +129,7 @@ private:
     // thread, so a full ring only means a transient backpressure spike, not a
     // stuck consumer — spin rather than silently drop a fill/trade record.
     void pushOut(const OutboundMessage& msg);
-#if LOGGING
+#if LOGGING || TESTING
     void pushTrade(const Trade& trade);
 #endif
 };

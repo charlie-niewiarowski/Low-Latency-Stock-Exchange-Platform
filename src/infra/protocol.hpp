@@ -16,48 +16,13 @@
 #include <string_view>
 
 //=============================================================================
-// Wire frame sizes
-//=============================================================================
-
-// Inbound frame: "EXCHANGE\n"(9) + InboundMessage(56) + '\n'(1) = 66 bytes + 6 bytes padding = 72 bytes.
-inline constexpr size_t INBOUND_BSIZE = 72;
-
-// Outbound frame: fixed 64 bytes (cache-line aligned).
-//   OK    -> "EXCHANGE\nOK\n"(12) + ClientId(4) + OrderId(8)          = 24 bytes
-//   ERROR -> "EXCHANGE\nERROR\n"(15) + longest_error_str(17) + '\n'(1) = 33 bytes
-// Both fit comfortably; the remaining bytes are zero-padded by the sender.
-inline constexpr size_t OUTBOUND_BSIZE = 32;
-
-//=============================================================================
-// Status prefixes (server -> client)
-//=============================================================================
-
-#define OK_STATUS    "EXCHANGE\nOK\n"       // 12 bytes; ClientId @ 12, OrderId @ 16
-#define MATCH_STATUS "EXCHANGE\nMATCH\n"   // 15 bytes; ClientId @ 15, OrderId @ 19
-#define ERROR_STATUS "EXCHANGE\nERROR\n"
-
-//=============================================================================
-// Error string helpers
-//=============================================================================
-
-constexpr std::string_view server_error_string(const ServerError error) {
-    switch (error) {
-        case ServerError::MALFORMED_REQUEST: return "malformed req";
-        case ServerError::INVALID_ORDER:     return "invalid order";
-        case ServerError::SYSTEM_ERROR:      return "system error";
-        case ServerError::EXECUTION_ERROR:   return "execution error";
-        default:                             return "null";
-    }
-}
-
-//=============================================================================
 // Transport protocols (market_feed / packet_factory)
 //=============================================================================
 // Minimal transport-layer headers packet_factory writes onto outgoing DPDK
-// packets. OUCH rides on TCP (order entry); ITCH rides on UDP (market data,
+// packets. OUCH rides on TCPHeader (order entry); ITCH rides on UDPHeader (market data,
 // multicast).
 
-struct TCP {
+struct TCPHeader {
     uint16_t src_port;
     uint16_t dst_port;
     uint32_t seq    = 0;
@@ -66,13 +31,13 @@ struct TCP {
     uint16_t window = 65535;
 };
 
-struct UDP {
+struct UDPHeader {
     uint16_t src_port;
     uint16_t dst_port;
 };
 
 //=============================================================================
-// OUCH 5.0 (order entry, client <-> exchange, carried over TCP)
+// OUCH 5.0 (order entry, client <-> exchange, carried over TCPHeader)
 //=============================================================================
 // Field names/sizes/order follow Nasdaq's OUCH 5.0 spec. Every message struct
 // leads with `message_type` at the same offset (byte 0) as every other one,
@@ -260,7 +225,7 @@ inline OUCH deserialize_ouch(std::span<const std::byte> bytes) noexcept {
 }
 
 //=============================================================================
-// ITCH 5.0 (market data, exchange -> subscribers, one-way over UDP multicast)
+// ITCH 5.0 (market data, exchange -> subscribers, one-way over UDPHeader multicast)
 //=============================================================================
 // Covers the per-order lifecycle messages this engine actually produces
 // (add/execute/cancel/delete/replace/trade). Reference-data and market-wide

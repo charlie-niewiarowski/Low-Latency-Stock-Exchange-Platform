@@ -33,7 +33,6 @@ set(EXCHANGE_SOURCES
         app/exchange.cpp
         engine/src/engine.cpp
         engine/src/orderbook.cpp
-        server/src/connection_info.cpp
         server/src/server.cpp
 )
 

@@ -10,7 +10,6 @@
 #define ORDER_H
 
 #include "order_request.hpp"
-#include "order_types.hpp"
 #include "config.hpp"
 
 #include <cstdint>

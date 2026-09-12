@@ -197,7 +197,7 @@ bool Orderbook::matchOrders() {
             // fill the orders
             auto fill_quantity = std::min(bid->remaining_quantity_, ask->remaining_quantity_);
 
-            #if LOGGING
+            #if LOGGING || TESTING
             Trade trade{
                 TradeInfo(bid->client_id_, bid->id_, bid->price_, fill_quantity),
                 TradeInfo(ask->client_id_, ask->id_, ask->price_, fill_quantity)
@@ -243,7 +243,7 @@ bool Orderbook::matchOrders() {
                 pool_.deallocate(ask);
             }
 
-            #if LOGGING
+            #if LOGGING || TESTING
             pushTrade(trade);
             #endif
 
@@ -308,7 +308,7 @@ bool Orderbook::matchMarket(const OrderRequest& order_request) {
             pushOut(market_msg);
             pushOut(ask_msg);
 
-            #if LOGGING
+            #if LOGGING || TESTING
             Trade match_trade{
                 TradeInfo(order_request.get_clientId(), id, best_ask_price_, fill_quantity),
                 TradeInfo(ask->client_id_, ask->id_, ask->price_, fill_quantity)
@@ -322,7 +322,7 @@ bool Orderbook::matchMarket(const OrderRequest& order_request) {
                 pool_.deallocate(ask);
             }
 
-            #if LOGGING
+            #if LOGGING || TESTING
             pushTrade(match_trade);
             #endif
 
@@ -369,7 +369,7 @@ bool Orderbook::matchMarket(const OrderRequest& order_request) {
             pushOut(market_msg);
             pushOut(ask_msg);
 
-            #if LOGGING
+            #if LOGGING || TESTING
             Trade match_trade{
                 TradeInfo(bid->client_id_, bid->id_, bid->price_, fill_quantity),
                 TradeInfo(order_request.get_clientId(), id, best_bid_price_, fill_quantity)
@@ -383,7 +383,7 @@ bool Orderbook::matchMarket(const OrderRequest& order_request) {
                 pool_.deallocate(bid);
             }
 
-            #if LOGGING
+            #if LOGGING || TESTING
             pushTrade(match_trade);
             #endif
 
@@ -424,7 +424,7 @@ void Orderbook::pushOut(const OutboundMessage& msg) {
     while (!out_ring_.push(msg)) {}
 }
 
-#if LOGGING
+#if LOGGING || TESTING
 void Orderbook::pushTrade(const Trade& trade) {
     while (!trades_ring_.push(trade)) {}
 }

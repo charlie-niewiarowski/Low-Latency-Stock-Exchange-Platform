@@ -6,3 +6,12 @@ src/client/build
 src/exchange/build
 bench/results
 bench/logs
+
+# CMake build-tree markers, in case a build directory ever gets pointed at a
+# source subdirectory (e.g. tests/) instead of one of the ignores above.
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+cmake_install.cmake
+_deps/

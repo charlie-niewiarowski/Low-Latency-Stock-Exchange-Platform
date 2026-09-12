@@ -21,29 +21,19 @@
 
 #include "protocol.hpp"
 
-// Layer 2/3 addressing for one endpoint of a packet_factory-built frame.
-// Kept out of protocol.hpp's TCP/UDP structs (which only carry the
-// transport-layer ports OUCH/ITCH actually need): rte_ether_addr is a DPDK
-// type, and protocol.hpp has no DPDK dependency so it can be reused by the
-// plain-socket exchange/client too.
+
 struct PacketEndpoint {
     rte_ether_addr mac;
     uint32_t       ip; // host byte order
 };
 
-// OUCH only ever rides TCP and ITCH only ever rides UDP (see protocol.hpp),
-// so those are the only two instantiations that make sense.
+
 template <typename transport_type, typename payload_type>
 concept ValidPacketCombo =
-    (std::is_same_v<transport_type, TCP> && std::is_same_v<payload_type, OUCH>) ||
-    (std::is_same_v<transport_type, UDP> && std::is_same_v<payload_type, ITCH>);
+    (std::is_same_v<transport_type, TCPHeader> && std::is_same_v<payload_type, OUCH>) ||
+    (std::is_same_v<transport_type, UDPHeader> && std::is_same_v<payload_type, ITCH>);
 
-// Builds/parses one wire frame for a (transport, application) protocol
-// pair: TCP+OUCH (order entry) or UDP+ITCH (market data). Ethernet and
-// IPv4 are common to both pairs, so build_packet() builds/finalizes them
-// directly; append_udp/append_tcp add only the transport-specific header,
-// and append_ouch/append_itch only the already-serialized application
-// payload (see protocol.hpp's serialize_ouch/serialize_itch).
+
 template <typename transport_type, typename payload_type>
     requires ValidPacketCombo<transport_type, payload_type>
 struct packet_factory {
@@ -64,6 +54,7 @@ private:
     static void append_itch(dpdk::packet &pkt, const payload_type &payload);
 };
 
+
 template <typename transport_type, typename payload_type>
     requires ValidPacketCombo<transport_type, payload_type>
 dpdk::packet packet_factory<transport_type, payload_type>::build_packet(
@@ -75,16 +66,12 @@ dpdk::packet packet_factory<transport_type, payload_type>::build_packet(
     dpdk::packet pkt = pool.get();
     if (!pkt) return pkt;
 
-    // Common to both protocol pairs: build regardless of which transport
-    // or application protocol this instantiation carries.
     dpdk::build_ethernet_header(pkt, dst.mac, src.mac, RTE_ETHER_TYPE_IPV4);
 
-    constexpr uint8_t next_proto = std::is_same_v<transport_type, TCP> ? IPPROTO_TCP : IPPROTO_UDP;
+    constexpr uint8_t next_proto = std::is_same_v<transport_type, TCPHeader> ? IPPROTO_TCP : IPPROTO_UDP;
     rte_ipv4_hdr *ip_hdr = dpdk::build_ipv4_header(pkt, src.ip, dst.ip, next_proto);
 
-    // Transport + payload, then finalize innermost-first: IPv4's
-    // total_length must be set before the TCP/UDP checksum helpers read it.
-    if constexpr (std::is_same_v<transport_type, TCP>) {
+    if constexpr (std::is_same_v<transport_type, TCPHeader>) {
         rte_tcp_hdr *tcp_hdr = append_tcp(pkt, transport_payload);
         append_ouch(pkt, payload_payload);
         dpdk::finalize_ipv4_header(pkt, ip_hdr);
@@ -138,11 +125,11 @@ template <typename transport_type, typename payload_type>
 payload_type packet_factory<transport_type, payload_type>::deserialize_packet(const dpdk::packet &packet)
 {
     // Fixed-size headers throughout this library (no VLAN tag, no IPv4
-    // options, no TCP options -- see build_ipv4_header/build_tcp_header's
+    // options, no TCPHeader options -- see build_ipv4_header/build_tcp_header's
     // own comments), so the application payload always starts at the same
     // fixed offset from the front of the frame.
     constexpr size_t transport_hdr_len =
-        std::is_same_v<transport_type, TCP> ? sizeof(rte_tcp_hdr) : sizeof(rte_udp_hdr);
+        std::is_same_v<transport_type, TCPHeader> ? sizeof(rte_tcp_hdr) : sizeof(rte_udp_hdr);
     constexpr size_t header_len = sizeof(rte_ether_hdr) + sizeof(rte_ipv4_hdr) + transport_hdr_len;
 
     if (packet.length() <= header_len) return payload_type{};

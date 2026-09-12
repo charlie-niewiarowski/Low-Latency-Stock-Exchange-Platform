@@ -201,7 +201,7 @@ void LoadGenerator::handleConnect(ClientState& cs) {
 //
 // The server pads every response to exactly FRAME_SIZE (OUTBOUND_BSIZE) bytes,
 // so the client always advances by FRAME_SIZE per message.  This gives byte-
-// level alignment: no matter where TCP splits a stream, we never mistake the
+// level alignment: no matter where TCPHeader splits a stream, we never mistake the
 // tail bytes of one frame for the header of the next.
 void LoadGenerator::handleReadable(ClientState& cs) {
     const ssize_t n = cs.read_buf.read_from(cs.fd);
