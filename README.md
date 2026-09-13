@@ -1,198 +1,178 @@
 # Client-Exchange Simulation
 
-A low-latency order exchange simulation written in C++23. It consists of two separate programs: an exchange server that runs a price-time-priority matching engine behind a TCP gateway, and a load-generator client that drives it with synthetic order traffic. The primary goal is to measure and minimize end-to-end order processing latency.
+A price-time-priority order-matching engine written in C++23, built around a low-latency
+matching core (order pool arena, intrusive price-level queues, SPSC ring buffers). The
+project is in the middle of migrating its network layer from a TCP/epoll gateway to a
+DPDK kernel-bypass gateway speaking real exchange wire protocols (OUCH for order entry,
+ITCH for market data). Linux only — the matching core and the DPDK gateway both depend on
+Linux-specific APIs (`epoll`, `pthread_setaffinity_np`, hugepages, DPDK's EAL).
 
 ---
 
-## Disclaimer
+## Current status
 
-DISCLAIMER, the latency benchmarks may not be accurate at the moment as I do not have access to a Linux system. The last tested commit should be 7db090536f36ae9112bc3f369f89384e58b3bdb0
+This is mid-rewrite and **the exchange and client binaries do not currently build**:
+
+- `exchange-release` / `exchange-debug` — `Exchange`'s constructor (`src/exchange/app/exchange.cpp`)
+  still calls the old 3-argument `Server(InboundRing&, OutboundRing&, std::atomic<bool>&)`
+  constructor, but `Server` (`src/exchange/server/include/server.hpp`) has already been
+  rewritten to the new DPDK/OUCH shape: `Server(shared_ptr<RingBuffer<OUCH>>, shared_ptr<RingBuffer<OUCH>>)`.
+  These two don't match.
+- `client-release` / `client-debug` — `ClientState`/`LoadGenerator`
+  (`src/client/include/client_state.hpp`, `src/client/src/load_generator.cpp`) still reference
+  `INBOUND_BSIZE`/`OUTBOUND_BSIZE`, wire-frame-size constants that no longer exist now that
+  `protocol.hpp` has been rewritten around OUCH/ITCH message structs instead of the old
+  fixed "EXCHANGE\n" + `InboundMessage` frame.
+
+What **does** build and run today (native Linux x86-64, verified against this branch):
+
+- `engine-tests` — links cleanly against the matching engine (`Engine`/`Orderbook`), though
+  `tests/engine_test.cpp` currently has no test cases in it (0 tests run).
+- `server-tests` — links cleanly against the new DPDK-based `Server`; its one test
+  (`ServerTest.test_receives_packets`) brings up a real DPDK EAL instance, so it needs
+  working hugepages and permissions (`/dev/hugepages`) to actually run, not just build.
+- `orderbook-bench` / `ring-buffer-bench` (`bench/executables/`) — isolated microbenchmarks
+  against `Orderbook` and `RingBuffer<T>` directly; neither touches `Server`, `Engine`,
+  or the client, so they're unaffected by the gateway rewrite.
+
+For a last known-working, fully end-to-end TCP/epoll version of the simulation (exchange
++ client, old repo layout without the `src/` prefix), see the `main` branch.
 
 ---
 
 ## Overview
 
-The exchange processes three order operations: NEW, CANCEL, and MODIFY. It supports both LIMIT and MARKET order types. On shutdown the exchange prints HDR histogram latency data covering the full round-trip as well as each internal segment (recv syscall, ring transit, engine processing, send syscall, and so on).
+The matching engine processes three order operations — NEW, CANCEL, MODIFY — over LIMIT
+and MARKET order types, with price-time priority. On shutdown the exchange prints HDR
+histogram latency data covering the full round-trip as well as each internal pipeline
+segment (recv/parse, ring transit, engine processing, send, etc. — see
+[Latency measurement](#latency-measurement)).
 
-The client opens N concurrent TCP connections and keeps each one pipelined with up to 32 in-flight requests at a time. Orders are generated synthetically using a geometric Brownian motion mid-price model.
+The intended end state (in progress) is a DPDK-based gateway: inbound OUCH order-entry
+packets are received off a DPDK rx queue, deserialized, validated, and handed to the
+matching engine; engine output is serialized back out as OUCH responses over a DPDK tx
+queue, and a separate `market_feed` component republishes fills as an ITCH-style UDP
+multicast feed. None of that gateway wiring exists yet — see
+[Current status](#current-status) and [In-progress DPDK/OUCH/ITCH gateway](#in-progress-dpdkouchitch-gateway) below for exactly what's there today.
 
 ---
 
 ## Repository layout
 
 ```
-Client-Exchange-Simulation/
+ClientExchangeSim/
   src/
     exchange/
       app/          Exchange entry point and top-level Exchange class
-      engine/       Matching engine (order book, matching logic)
-      server/       TCP gateway (epoll inbound/outbound threads)
-      config/       src/exchange/config/config.hpp  -- all compile-time knobs
+      engine/       Matching engine (order pool, price-level queues, order book)
+        include/    engine.hpp, orderbook.hpp, order.hpp, order_pool.hpp,
+                     price_level_queue.hpp, order_request.hpp, trade.hpp
+      server/       In-progress DPDK-based gateway (see status above)
+        include/    server.hpp, latency.hpp (HDR histogram + TSC latency handler)
+      market_feed/  Stub ITCH multicast publisher — not wired into the build
+      config/       src/exchange/config/config.hpp -- all compile-time knobs
     client/
       app/          Client entry point
-      src/          LoadGenerator (epoll event loop)
+      src/          LoadGenerator (epoll event loop) -- currently broken, see status above
       include/      ClientState, LoadGenerator, OrderFactory
-      config/       src/client/config/config.hpp  -- all compile-time knobs
+      config/       src/client/config/config.hpp -- all compile-time knobs
     infra/          Wire types + hot-path primitives shared by both programs
                     (dependency-free by design, so it can be lifted into a
                     separate repo for future trading systems without touching
                     exchange/ or client/)
-      protocol.hpp    Frame sizes, status prefixes, error strings
-      communication_types.hpp  InboundMessage, OutboundMessage structs
+      protocol.hpp    TCPHeader/UDPHeader + real OUCH 5.0 / ITCH 5.0 message structs
+      communication_types.hpp  InboundMessage/OutboundMessage (the older
+                      internal engine<->gateway message shape; still what
+                      Engine/Orderbook consume today)
       order_types.hpp  Primitive type aliases (Price, Quantity, OrderId, etc.)
-      buffer.hpp      Header-only fixed-capacity byte buffer
+      packet_factory.hpp  Builds/parses DPDK packets carrying OUCH or ITCH payloads
+      buffer.hpp      Header-only fixed-capacity byte buffer (TCP read/write path)
       ring_buffer.hpp Lock-free SPSC ring buffer
+      validation.hpp  Stub -- OUCH/ITCH validation not yet implemented
       perf.hpp        Software prefetch hints + thread/core pinning helpers
-  tests/          Unit/integration tests, mirroring src/'s layout (see Tests below)
-  bench/          Python benchmark suite (throughput, latency, regression)
-  docs/           Standalone design/change-log notes
+  tests/          engine-tests, server-tests (GoogleTest; see status above)
+  bench/          Python benchmark suite + isolated C++ microbenchmarks
   CMakeLists.txt  Root build file
 ```
 
 ---
 
-## Prerequisites
+## Prerequisites (Linux only)
 
-**Native Linux build:**
-- Linux (the server uses `epoll` and thread pinning via `pthread_setaffinity_np`)
-- GCC or Clang with C++23 support
-- CMake 3.25 or newer
-- Python 3.9 or newer (only needed for the `bench/` suite)
-- An internet connection on first build (CMake fetches HdrHistogram_c via FetchContent)\
+- Linux, x86-64. The matching engine uses `__rdtsc`/`-march=native`; the server links
+  DPDK, which needs a Linux kernel (hugepages, UIO/VFIO) regardless of what it ends up
+  driving traffic through.
+- GCC or Clang with C++23 support.
+- CMake 3.25 or newer.
+- **DPDK development headers, discoverable via `pkg-config --modversion libdpdk`.** On
+  Debian/Ubuntu: `sudo apt install dpdk dpdk-dev libdpdk-dev`. This is a hard build
+  dependency today: `exchange-release`/`exchange-debug`/`server-tests` all link
+  `dpdk_lib`, a small wrapper library CMake fetches from
+  `github.com/charlie-niewiarowski/dpdk-wrapper-library`, and that library's own
+  `CMakeLists.txt` does `pkg_check_modules(DPDK REQUIRED IMPORTED_TARGET libdpdk)`.
+- Working hugepages if you intend to actually *run* anything that brings up the DPDK EAL
+  (`server-tests`, and eventually the exchange binary) — not required just to build.
+- Python 3.9 or newer (only needed for the `bench/` suite).
+- An internet connection on first configure — CMake's `FetchContent` pulls down
+  HdrHistogram_c, the DPDK wrapper library, and (for `tests/`) GoogleTest.
 
-**macOS / Windows (Docker):**
-- Docker Desktop
-- Apple Silicon Macs must enable Rosetta in Docker Desktop settings
+---
 
-The project has been developed and tested on x86-64. The `__rdtsc` intrinsic and `-march=native` are used throughout, so it will not build correctly on non-x86 targets without modification. Under Docker on Apple Silicon the simulation runs via x86-64 emulation. It's functional but not suitable for latency benchmarking.
-
-## Linux Build
+## Build
 
 ```bash
-# Clone and enter the repo
 git clone <repo-url>
-cd Client-Exchange-Simulation
+cd ClientExchangeSim
 
-# Configure (downloads hdr_histogram on first run)
 cmake -S . -B build
-
-# Build all targets
-cmake --build build -j$(nproc)
 ```
 
-This produces four binaries:
+Building everything (`cmake --build build -j$(nproc)`) will currently fail partway
+through on the `exchange-*` and `client-*` targets (see
+[Current status](#current-status)). Build the targets that actually work individually:
 
-| Binary | Path | Notes |
+```bash
+cmake --build build --target engine-tests -j$(nproc)
+cmake --build build --target server-tests -j$(nproc)     # needs libdpdk to build
+cmake --build build --target orderbook-bench ring-buffer-bench -j$(nproc)
+```
+
+```bash
+./build/tests/engine-tests
+./build/tests/server-tests      # needs hugepages/permissions to actually run
+./build/bench/executables/orderbook-bench
+./build/bench/executables/ring-buffer-bench
+```
+
+---
+
+## Benchmark suite (`bench/`)
+
+The `bench/` directory holds a suite of Python benchmarks that build, launch, and drive
+things for you, split into two families:
+
+| Script | Measures | Depends on the broken exchange/client? |
 |---|---|---|
-| `exchange-release` | `build/exchange/exchange-release` | `-O3 -march=native` |
-| `exchange-debug`   | `build/exchange/exchange-debug`   | AddressSanitizer + UBSanitizer |
-| `client-release`   | `build/client/client-release`     | `-O3 -march=native` |
-| `client-debug`     | `build/client/client-debug`       | `-g -march=native` |
+| `saturation` | Peak sustained req/s, sweeping client count (closed-loop) | Yes |
+| `latency_curve` | End-to-end latency percentiles vs offered load | Yes |
+| `stage_breakdown` | Per-stage latency histograms (`DIAGNOSTICS=1`) | Yes |
+| `regression` | Fixed-seed run checked against a stored baseline | Yes |
+| `ring_buffer` | `RingBuffer<T>` push/pop latency + throughput, in isolation | No |
+| `orderbook_perf` | Cache/branch-miss rate for `Orderbook::process()`, in isolation | No |
+| `perf_on_executable` | Generic `perf stat` wrapper for any executable | No |
 
-Individual targets can be built in isolation:
-
-```bash
-cmake --build build --target exchange-release
-cmake --build build --target client-release
-```
-
----
-
-## Linux Run
-
-Start the exchange first, then start the client in a separate terminal:
+The first four drive `build/exchange/exchange-release` and `build/client/client-release`
+directly and will not run until those targets build again. `ring_buffer` and
+`orderbook_perf` build and run their own standalone executables
+(`bench/executables/ring_buffer_bench.cpp`, `orderbook_bench.cpp`) and work today:
 
 ```bash
-# Terminal 1
-./build/exchange/exchange-release
-
-# Terminal 2  (10 clients, random seed)
-./build/client/client-release 10
-
-# Terminal 2  (10 clients, fixed seed for reproducibility)
-./build/client/client-release 10 42
+python3 -m bench.scripts.ring_buffer op
+python3 -m bench.scripts.ring_buffer spsc --capacity 524288 --iters 2000000
+python3 -m bench.scripts.orderbook_perf --ops 10000000 --reps 20 --core 6
 ```
 
-Stop both with Ctrl-C. When the exchange stops it prints the latency histograms to stdout. The client prints aggregate throughput stats to stderr.
-
----
-
-## Docker (macOS / Windows)
-
-The Docker image is a pure Linux build environment. Your source tree is mounted into the container, and the build directory lives in a dedicated named volume — kept separate from any host `./build` so a macOS/Homebrew CMake cache can never collide with the Linux one. Builds persist across runs and you interact with the project exactly as you would on a native Linux machine.
-
-```bash
-# Build the image once (or after changing the Dockerfile)
-docker compose build
-```
-
-Then, whenever you open a terminal, run this one command to enter a Linux shell:
-
-```bash
-docker compose run --rm dev
-```
-
-You are now inside the container at `/app` (your project root). Everything from here is identical to working on Linux:
-
-```bash
-cmake -S . -B build                          # configure (once)
-cmake --build build -j$(nproc)              # build everything
-./build/exchange/exchange-release            # run the exchange
-./build/client/client-release 10            # run the client
-```
-
-**Dedicated exchange / client services:**  
-The Compose file also defines `exchange` and `client` services so you can build and run the two programs with separate commands instead of a shared shell. First build the release binaries once (they persist in the shared `build` volume). Wrap any command using `$(nproc)` in `sh -c '...'` so it expands inside the container rather than your host shell:
-
-```bash
-docker compose run --rm dev cmake -S . -B build                          # configure (once)
-docker compose run --rm dev cmake --build build --target exchange-release
-docker compose run --rm dev cmake --build build --target client-release
-```
-
-Then run each side with its own command:
-
-```bash
-# Terminal 1 — exchange
-docker compose run --rm exchange
-
-# Terminal 2 — client (auto-starts the exchange if it isn't already up)
-docker compose run --rm client          # 10 clients (default)
-docker compose run --rm client 20 42    # 20 clients, fixed seed 42
-```
-
-The client connects to `127.0.0.1`, so its service joins the exchange's network namespace (`network_mode: "service:exchange"`) — no source changes needed. The client's reconnect backoff covers the brief window before the exchange is listening. Stop each with Ctrl-C.
-
-If you prefer a single interactive shell instead, use a named container so a second terminal can attach to it:
-
-```bash
-# Terminal 1 — start a named container
-docker compose run --rm --name sim dev
-# inside: ./build/exchange/exchange-release
-
-# Terminal 2 — attach to the same container
-docker exec -it sim bash
-# inside: ./build/client/client-release 10
-```
-
----
-
-## Example Client Output
-```
-=== Stats ===
-  elapsed         : 15.003 s
-  requests sent   : 15243872
-  ACK responses   : 15243872
-  MATCH responses : 1884231
-  ERR responses   : 0
-  orders in flight: 0
-  --- throughput ---
-  requests/s      : 1016005
-  ACK/s           : 1016005
-  MATCH/s         : 125587
-  ERR/s           : 0
-  total resp/s    : 1016005
-```
+See `bench/README.md` for the full script reference, flags, and output layout.
 
 ---
 
@@ -205,26 +185,30 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | Macro | Default | Description |
 |---|---|---|
 | `LOGGING` | `0` | Print matched trades to stdout |
-| `DIAGNOSTICS` | `0` | Collect per-segment TSC timestamps; enables detailed latency histograms |
-| `TESTING` | `0` | Expose `Engine::step()` and inspection accessors for unit tests |
+| `DIAGNOSTICS` | `1` | Collect per-segment TSC timestamps; enables detailed latency histograms |
+| `TESTING` | `0` | Expose `Engine`/`Orderbook` inspection accessors for unit tests (overridden to `1` by `tests/CMakeLists.txt` for `engine-tests`) |
+| `PREFETCH` | `1` | Software prefetch hints on the matching hot path; set `0` to compile them out |
 | `MIN_PRICE` | `1` | Minimum valid limit price (integer ticks) |
 | `MAX_PRICE` | `100000` | Maximum valid limit price; $1000.00 = 100000 ticks |
 | `MATCHING_CORE` | `1` | CPU core the matching thread is pinned to |
-| `INBOUND_CORE` | `2` | CPU core the inbound TCP thread is pinned to |
-| `OUTBOUND_CORE` | `3` | CPU core the outbound TCP thread is pinned to |
-| `PORT` | `"4000"` | TCP port the exchange listens on |
+| `INBOUND_CORE` | `2` | CPU core the inbound gateway thread is pinned to |
+| `OUTBOUND_CORE` | `3` | CPU core the outbound gateway thread is pinned to |
+| `PORT` | `"4000"` | TCP port (unused by the current DPDK `Server`; left over from the TCP gateway) |
 | `MAX_CLIENTS` | `64` | Maximum simultaneous connections |
 | `PIPELINE_DEPTH` | `32` | Per-connection outbound staging ring capacity |
 | `COMMUNICATION_RING_COUNT` | `524288` | Inbound and outbound SPSC ring sizes |
-| `LATENCY_SAMPLE_COUNT` | `100000000` | How many samples to collect before stopping |
-| `LATENCY_SAMPLE_DROP` | `100000` | Cold-start samples to discard before recording |
+| `PREALLOCATION_COUNT` | `1000000` | `OrderPool` arena capacity / `OrderMap` reserve |
+| `RINGBUF_SIZE` | `512` | Per-client `RingBuffer<OUCH>` capacity used by `server-tests` |
+| `LATENCY_SAMPLE_DROP` | `5` | Cold-start samples discarded before recording |
+| `LATENCY_SAMPLE_COUNT` | `2000 + LATENCY_SAMPLE_DROP` | How many samples to collect before stopping |
 
 ### Client: `src/client/config/config.hpp`
 
 | Macro | Default | Description |
 |---|---|---|
 | `LOGGING` | `0` | Log each ACK, MATCH, ERR, and reconnect event to stderr |
-| `DIAGNOSTICS` | `0` | Print client-side diagnostic info |
+| `DIAGNOSTICS` | `1` | Print client-side diagnostic info |
+| `MIN_PRICE` / `MAX_PRICE` | `1` / `100000` | Must match the exchange's config -- the exchange indexes its price ladder directly by `(price - MIN_PRICE)` |
 | `EXCHANGE_HOST` | `"127.0.0.1"` | Exchange address |
 | `EXCHANGE_PORT` | `4000` | Exchange port |
 | `CLIENT_CORE` | `4` | CPU core the client event loop is pinned to |
@@ -234,114 +218,103 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | `MID_PRICE_UPDATE_N` | `16` | How many frames between GBM mid-price updates |
 | `MEAN_QTY` | `100.0` | Log-normal order quantity mean |
 | `QTY_VOL` | `0.8` | Log-normal order quantity volatility |
+| `MAX_ACTIVE_ORDERS` | `32` | Per-connection ring of order ids kept as CANCEL/MODIFY targets |
 | `PIPELINE_DEPTH` | `32` | In-flight requests per connection |
-
----
-
-## Benchmark suite (`bench/`)
-
-The `bench/` directory holds a small suite of Python benchmarks that build,
-launch, and drive the exchange/client pair for you. A shared harness
-(`bench/benchlib.py`) auto-detects the backend — it runs the **native** release
-binaries on Linux x86-64 (real latency) and otherwise falls back to **Docker**
-(functional throughput; latency is emulated and clearly flagged). Any compile-time
-knob a benchmark toggles (`EXPECTED_THROUGHPUT`, `DIAGNOSTICS`) is edited and then
-restored, guaranteed even on Ctrl-C. Results are printed as tables and written to
-`bench/results/` as CSV + JSON; raw per-run logs land in `bench/logs/`.
-
-| Script | Measures |
-|---|---|
-| `saturation` | Peak sustained req/s and the plateau, sweeping client count (closed-loop) |
-| `latency_curve` | End-to-end latency percentiles vs offered load (supersedes the old `bench.py`) |
-| `stage_breakdown` | Per-stage latency histograms (`DIAGNOSTICS=1`) to locate the bottleneck |
-| `regression` | Fixed-seed run checked against a stored baseline — a CI gate |
-
-Run any of them as a module from the repo root:
-
-```bash
-python3 -m bench.scripts.saturation --clients 1,2,4,8,16,32 --duration 10
-python3 -m bench.scripts.latency_curve --levels 250000,1000000,3500000 --clients 10
-python3 -m bench.scripts.stage_breakdown --clients 16 --duration 20
-python3 -m bench.scripts.regression --update      # record a baseline, then re-run to check
-```
-
-Common flags: `--runner {auto,native,docker}`, `--duration`, `--seed`, `--no-build`.
-See `bench/README.md` for details. **Reliable latency numbers require native Linux
-x86-64** — under Docker on Apple Silicon the pipeline runs but latency figures are
-emulated (throughput remains meaningful).
+| `CLIENT_EPOLL_BATCH` | `512` | Max epoll events drained per loop iteration |
+| `RECONNECT_DELAY_MS` | `1000` | Reconnect backoff ceiling (linear) |
 
 ---
 
 ## How it works
 
-### Wire protocol
+### The matching engine (working, tested via benchmarks today)
 
-Every frame sent from client to exchange is 72 bytes:
-- 9-byte ASCII header `"EXCHANGE\n"`
-- 56-byte `InboundMessage` struct (containing timestamps, order fields, and message type)
-- 1-byte newline + 6 bytes padding
+`Engine` is a thin driver: it owns the matching thread, assigns `OrderId`s to NEW orders,
+translates each `InboundMessage` into an `OrderRequest`, and hands it to `Orderbook::process()`.
 
-Every frame sent from exchange to client is 32 bytes:
-- ACK: `"EXCHANGE\nOK\n"` (12 B) + 4-byte ClientId + 8-byte OrderId + zero padding
-- Fill notification: `"EXCHANGE\nMATCH\n"` (15 B) + 4-byte ClientId + 8-byte OrderId + zero padding
-- Error: `"EXCHANGE\nERROR\n"` + ASCII error string + newline + zero padding
+`Orderbook` owns all book state and mutation logic:
 
-Fixed frame sizes allow both sides to parse byte streams without a length prefix or delimiter search: each side advances by exactly one frame size per message.
-
-### Exchange threads
-
-The exchange runs three threads, each pinned to a dedicated CPU core:
-
-**Inbound thread** (`INBOUND_CORE`): accepts TCP connections via `accept()`, reads incoming bytes into per-connection read buffers using `epoll`, validates each frame, stamps an initial TSC value, and pushes `InboundMessage` structs onto the inbound SPSC ring. Validation errors are forwarded to the outbound thread via a separate error channel rather than being handled inline.
-
-**Matching thread** (`MATCHING_CORE`): spins on the inbound ring, popping one message at a time and dispatching it to the order book. After processing it pushes an `OutboundMessage` onto the outbound ring. No synchronization is needed beyond the ring's acquire/release memory ordering.
-
-**Outbound thread** (`OUTBOUND_CORE`): drains the outbound ring and routes each message to the correct client file descriptor using a `ClientId -> fd` map. It serializes responses into per-connection write buffers and drains those to the kernel via `send()`. Back-pressure is handled by arming `EPOLLOUT` on the rare occasion that `send()` returns `EAGAIN`.
-
-### Order book
-
-The book stores bids and asks as fixed-size arrays of price-level queues indexed by price tick (`bids_[price - MIN_PRICE]`). This makes best-bid/best-ask lookup O(1) in the common case. Each price-level queue is an intrusive doubly-linked list of `Order` objects stored by value in an `unordered_map<OrderId, Order>`, which keeps pointer stability across insertions.
-
-Matching runs after every `addOrder` or `modifyOrder` call. It walks from the best bid price down and the best ask price up, filling contra-side orders until no crossing remains. MARKET orders bypass the book entirely and fill against the current best available price.
-
-### Connection lifecycle
-
-Disconnections are handled with a two-phase close protocol to avoid race conditions between the two server threads. When the inbound thread detects a hangup it sets `condemned_inbound_[fd]`. The outbound thread scans for this flag, cleans up its own per-fd state, then sets `condemned_outbound_[fd]`. The inbound thread scans for that flag and only then calls `close()` on the file descriptor. This ordering guarantees no thread accesses freed state.
+- **`OrderPool`** is the single owner of every `Order` object -- a fixed-capacity arena
+  (`std::vector<Order>`, sized by `PREALLOCATION_COUNT`) with a free-list stack for O(1)
+  allocate/deallocate. Nothing else in the book allocates or frees an `Order`; the
+  `OrderMap` and `PriceLevelQueue`s only ever hold non-owning pointers into this pool.
+- **`PriceLevelQueue`** is an intrusive doubly-linked list of `Order` nodes: push at the
+  back, pop from the front (time priority), and O(1) removal of an arbitrary order
+  (cancellation) via its own `prev_`/`next_` pointers.
+- Bids and asks are each a fixed-size `std::array<PriceLevelQueue, MAX_PRICE - MIN_PRICE + 1>`
+  indexed directly by `price - MIN_PRICE`, making best-bid/best-ask lookup O(1) in the
+  common case.
+- `process()` runs matching after every add/modify: it walks from the best bid down and
+  the best ask up, filling contra-side orders until no crossing remains. MARKET orders
+  bypass the book and fill against the current best available price. Every request gets
+  exactly one direct ack/error via `ProcessResult`, regardless of how many MATCH fills it
+  also produced (those get pushed to the outbound ring separately, one per affected
+  counterparty).
+- A one-ahead software-prefetch pipeline (`Engine::handleMatching`) pops the *next*
+  inbound message and prefetches the price-level/`orders_` slot it will touch while the
+  *current* request is still being processed by `Orderbook::process()`, hiding that cache
+  miss behind real work (`PREFETCH` config macro; see `src/infra/perf.hpp`).
 
 ### Latency measurement
 
-Eight TSC timestamps are taken per request when `DIAGNOSTICS` is enabled:
-- t0: before the `recv` syscall
-- t1: after the `recv` syscall
-- t2: after pushing onto the inbound ring
-- t3: after the engine pops from the inbound ring
-- t4: after the engine pushes onto the outbound ring
-- t5: after the server pops from the outbound ring
-- t6: before the `send` syscall
-- t7: after the `send` syscall
+`LatencyHandler` (`src/exchange/server/include/latency.hpp`) records up to eight TSC
+timestamps per request (t0..t7, spanning read → inbound ring → engine → outbound ring →
+write) and, at shutdown, converts tick deltas to nanoseconds using a calibrated
+ticks-per-nanosecond ratio, reporting p50/p90/p99/p99.9/p99.99/max per segment via
+HdrHistogram. This piece is gateway-agnostic and will keep working whichever transport
+ends up feeding it.
 
-At shutdown, `LatencyHandler` converts tick differences to nanoseconds using a calibrated ticks-per-nanosecond ratio and reports p50/p90/p99/p99.9/p99.99/max for each segment using HdrHistogram.
+### In-progress DPDK/OUCH/ITCH gateway
 
-Without `DIAGNOSTICS`, only t0 and t7 are recorded (end-to-end latency only).
+`src/infra/protocol.hpp` defines real exchange wire formats: **OUCH 5.0** (order entry,
+carried over a `TCPHeader`) and **ITCH 5.0** (market data, one-way multicast over a
+`UDPHeader`) -- field names/sizes/order follow Nasdaq's public specs, with a common
+`message_type` at byte 0 of every variant so a receiver can dispatch before knowing which
+member of the `OUCH`/`ITCH` union is live. `packet_factory<transport, payload>`
+(`src/infra/packet_factory.hpp`) builds and parses whole DPDK packets (Ethernet + IPv4 +
+TCP/UDP + OUCH/ITCH payload) on top of a separately-fetched DPDK wrapper library
+(`dpdk::runtime`, `dpdk::port`, `dpdk::packet_pool`, ...).
 
-### Client load generator
+Today, `Server` (`src/exchange/server/src/server.cpp`) brings up a `dpdk::runtime` and one
+port, and spawns inbound/outbound threads -- but `inbound_()` only logs each received
+packet's length, `outbound_()` is an empty loop, and neither touches `packet_factory`,
+OUCH parsing, or the matching engine yet. `market_feed` (an ITCH multicast publisher
+meant to consume fills off a queue the engine publishes to) is a header/stub with no
+implementation. `src/infra/validation.hpp` is a placeholder for OUCH/ITCH validation that
+hasn't been written.
 
-`LoadGenerator` runs a single-threaded `epoll` event loop managing N non-blocking TCP connections simultaneously. Each connection maintains a pipeline of up to `PIPELINE_DEPTH` in-flight requests. When a response arrives the pipeline slot is freed and a new request is immediately queued.
+The old TCP/epoll wire format is still what `OrderFactory` (`src/client/include/order_factory.hpp`)
+builds and what `Engine`/`Orderbook` consume (`InboundMessage`/`OutboundMessage` in
+`src/infra/communication_types.hpp`): a 9-byte `"EXCHANGE\n"` header, a 56-byte
+`InboundMessage`, and a trailing newline + padding. That framing has no home in the new
+gateway yet -- `Server` doesn't speak it, and the client-side buffering that used to wrap
+it around a TCP socket references buffer-size constants (`INBOUND_BSIZE`/`OUTBOUND_BSIZE`)
+that were removed when `protocol.hpp` was rewritten around OUCH/ITCH (see
+[Current status](#current-status)).
 
-Order types are generated by `OrderFactory`, a singleton that shares one RNG and one GBM mid-price state across all connections. The default probability mix is approximately 79% NEW, 12% CANCEL, and 9% MODIFY. CANCEL and MODIFY target order IDs returned by previous NEW acknowledgements. Market and limit orders are chosen with equal probability.
+### Client load generator (currently doesn't build -- see status)
 
-Rate limiting is controlled by `EXPECTED_THROUGHPUT`: when set to a non-zero value the client computes a per-connection inter-arrival time and holds each connection to one request per interval. When set to `0` the client runs as fast as possible.
+`LoadGenerator` is a single-threaded `epoll` event loop meant to manage N pipelined,
+non-blocking TCP connections (`PIPELINE_DEPTH` in-flight requests each), generating orders
+via `OrderFactory` -- a singleton sharing one RNG and one GBM mid-price model across all
+connections (roughly 74% NEW / 14% CANCEL / 8% MODIFY, market/limit chosen with equal
+probability). `EXPECTED_THROUGHPUT` (0 = unlimited) controls an open-loop per-connection
+inter-arrival rate cap. This is the piece most directly broken by the protocol rewrite;
+see [Current status](#current-status).
 
 ---
 
 ## Tests
 
-Test files live under `tests/exchange/engine/` and `tests/exchange/server/`, mirroring `src/exchange/`'s layout, and are wired into CMake as four targets: `engine-tests`, `validation-tests`, `integration-tests`, `server-pipeline-tests` (`TESTING` is compiled to `1` for these targets specifically via `target_compile_definitions`, independent of the `src/exchange/config/config.hpp` default of `0`).
+`tests/` builds two GoogleTest targets:
 
-**They are not actively maintained and currently fail to compile** against the current engine/server API — confirmed while wiring them into CMake for this reorg. Known breakage, in case someone picks this up:
-- `test_validation.cpp` / `test_integration.cpp` / `test_server_pipeline.cpp` build `InboundMessage` with old positional initializers; the struct has since grown three leading `Timestamp` fields and no longer matches that shape.
-- `test_server_pipeline.cpp` also references `err_invalid_order` / `err_malformed_request` helpers that no longer exist.
-- `server_fixture.hpp` calls a public `Server::stop()` that isn't public anymore (`stop_` is now a private reference into a shared atomic, part of the two-phase close protocol).
-- `engine_test.cpp` needs `Engine::pop_trade()` → `Orderbook::pop_trade()`, but that accessor is gated `#if LOGGING`, not `#if TESTING`, so it doesn't exist in a `TESTING=1, LOGGING=0` build.
-
-`engine-tests` only needs `src/exchange/engine/{include,src}`; the three server-side targets additionally link `hdr_histogram_static` (pulled in transitively by `latency.hpp`).
+- **`engine-tests`** -- builds `engine.cpp`/`orderbook.cpp` with `TESTING=1` (exposing
+  `Orderbook`'s inspection accessors) and links only `infra`. `tests/engine_test.cpp` is
+  currently empty (0 test cases); this target exists as ready-to-use scaffolding for
+  whoever writes the next matching-engine test.
+- **`server-tests`** -- builds against the DPDK-based `Server` and links `dpdk_lib`
+  alongside `infra`. Its one test (`ServerTest.test_receives_packets`) opens a plain TCP
+  socket, which nothing in `Server` currently listens on, and constructing `Server` itself
+  brings up a real DPDK EAL instance -- so it needs working hugepages/permissions
+  (`/dev/hugepages`) just to get past the fixture's constructor, and will need updating
+  once `Server` actually parses OUCH traffic.
