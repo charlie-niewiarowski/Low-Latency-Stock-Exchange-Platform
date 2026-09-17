@@ -60,5 +60,8 @@ set(SERVER_TEST_INCLUDES
 
 add_executable(server-tests ${SERVER_TEST_SOURCES})
 target_include_directories(server-tests PRIVATE ${SERVER_TEST_INCLUDES})
+# TESTING=1 switches Server's EAL bring-up (server.cpp) to a software-only
+# vdev instead of assuming a real hugepage-backed, PCI-bound NIC.
+target_compile_definitions(server-tests PRIVATE TESTING=1)
 target_link_libraries(server-tests PRIVATE infra dpdk_lib GTest::gtest_main)
 gtest_discover_tests(server-tests)

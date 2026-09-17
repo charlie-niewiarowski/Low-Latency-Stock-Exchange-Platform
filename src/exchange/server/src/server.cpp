@@ -8,6 +8,30 @@
 #include <thread>
 #include <utility>
 
+namespace {
+
+// Production wants the real EAL defaults: probe the PCI bus, bind whatever
+// NIC is bound to a DPDK PMD, use hugepages. Tests can't assume any of
+// that -- no hugepage permissions, no NIC bound away from the kernel -- so
+// server-tests (TESTING=1) instead brings up a software-only EAL: no
+// hugepages (regular process memory instead), no PCI probing, and a single
+// net_ring vdev standing in for port 0.
+dpdk::runtime_params make_runtime_params() {
+#if TESTING
+    return dpdk::runtime_params{
+        .program_name = "exchange-server",
+        .legacy_mem_mb = 128,
+        .no_huge = true,
+        .no_pci = true,
+        .vdevs = {"net_ring0"},
+    };
+#else
+    return dpdk::runtime_params{.program_name = "exchange-server"};
+#endif
+}
+
+} // namespace
+
 // dpdk::runtime/dpdk::port have no default constructor, so they can't be
 // left blank in the mem-initializer list and assigned in the body — they
 // have to be constructed directly, in declaration order, right here.
@@ -18,7 +42,7 @@
 Server::Server(std::shared_ptr<RingBuffer<OUCH>> inbound_ring,
                std::shared_ptr<RingBuffer<OUCH>> outbound_ring)
 try :
-    dpdk_runtime_(dpdk::runtime_params{.program_name = "exchange-server"}),
+    dpdk_runtime_(make_runtime_params()),
     dpdk_port_(std::move(dpdk_runtime_.add_port(/*port_id=*/0, /*n_rx_queues=*/1, /*n_tx_queues=*/1))),
     inbound_ring_(std::move(inbound_ring)),
     outbound_ring_(std::move(outbound_ring))
@@ -34,21 +58,23 @@ void Server::run() {
 }
 
 void Server::inbound_() {
-    for (;;) {
-        dpdk::packet_burst burst = dpdk_port_.receive_burst(/*queue_id=*/0);
+    const auto rx_queue = dpdk_port_.claim_rx_queue();
+
+    while (!shutdown_.load()) {
+        dpdk::packet_burst burst = rx_queue->receive_burst();
 
         if (burst.empty()) {
             continue;
         }
 
         for (const dpdk::packet& packet : burst) {
-            std::cout << "Received packet with length: " << packet.length() << "\n";
+            std::cerr << "Received packet with length: " << packet.length() << "\n";
         }
     }
 }
 
 void Server::outbound_() {
-    for (;;) {
+    while (!shutdown_.load()) {
 
     }
 }

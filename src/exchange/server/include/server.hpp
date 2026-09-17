@@ -5,12 +5,15 @@
 #ifndef TOYEXCHANGE_ORDERGATEWAY_HPP
 #define TOYEXCHANGE_ORDERGATEWAY_HPP
 
+#include <condition_variable>
+
 #include "config.hpp"
 
 #include <runtime.h>
 #include <packet_factory.hpp>
 #include <ring_buffer.hpp>
 #include <unordered_map>
+#include <atomic>
 
 // TODO soupbintcp
 
@@ -26,6 +29,8 @@ However, internally we have to store packet information for each client ID
 naturally we could do client ID -> addressing information
 */
 class Server {
+    friend class ServerTest;
+
 public:
     Server() = delete;
     explicit Server(std::shared_ptr<RingBuffer<OUCH>> inbound_ring,
@@ -52,6 +57,8 @@ private:
     std::shared_ptr<RingBuffer<OUCH>> outbound_ring_;
 
     std::unordered_map<ClientId, ClientEndpoint> client_endpoints_;
+
+    std::atomic<bool> shutdown_;
 
     void inbound_();
     void outbound_();
