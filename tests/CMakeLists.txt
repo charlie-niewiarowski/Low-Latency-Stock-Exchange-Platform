@@ -63,5 +63,20 @@ target_include_directories(server-tests PRIVATE ${SERVER_TEST_INCLUDES})
 # TESTING=1 switches Server's EAL bring-up (server.cpp) to a software-only
 # vdev instead of assuming a real hugepage-backed, PCI-bound NIC.
 target_compile_definitions(server-tests PRIVATE TESTING=1)
-target_link_libraries(server-tests PRIVATE infra dpdk_lib GTest::gtest_main)
+target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map GTest::gtest_main)
 gtest_discover_tests(server-tests)
+
+# ── packet_factory ───────────────────────────────────────────────────────────
+# packet_factory.hpp/protocol.hpp (src/infra) talk to the DPDK runtime
+# directly (packet_pool, ethernet/ipv4 header builders), so this target
+# links dpdk_lib alongside infra like server-tests does -- but it has no
+# TESTING-gated code path of its own (no config.hpp, no Server), so it
+# brings up its own minimal EAL params in-test rather than needing TESTING=1.
+
+add_executable(packet-factory-tests packet_factory_tests.cpp)
+target_include_directories(packet-factory-tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${ROOT_SRC}/infra
+)
+target_link_libraries(packet-factory-tests PRIVATE infra dpdk_lib GTest::gtest_main)
+gtest_discover_tests(packet-factory-tests)
