@@ -5,9 +5,9 @@
 #ifndef UNTITLED_TRADE_H
 #define UNTITLED_TRADE_H
 
-#include <vector>
-
 #include "order_types.hpp"
+
+#include <vector>
 
 struct TradeInfo { // used to output results
     ClientId client_id_;

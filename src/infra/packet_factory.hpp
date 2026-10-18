@@ -20,7 +20,10 @@
 #include <cstring>
 #include <netinet/in.h> // IPPROTO_TCP / IPPROTO_UDP
 
-#include "protocol.hpp"
+#include "network_proto.hpp"
+#include "ouch_proto.hpp"
+#include "itch_proto.hpp"
+#include "communication_proto.hpp"
 
 
 struct PacketEndpoint {
@@ -37,7 +40,8 @@ inline rte_ether_addr to_rte_ether_addr(const MacAddress &mac) noexcept {
 
 template <typename transport_type, typename payload_type>
 concept ValidPacketCombo =
-    (std::is_same_v<transport_type, TCPHeader> && std::is_same_v<payload_type, OUCH>) ||
+    (std::is_same_v<transport_type, TCPHeader> &&
+        (std::is_same_v<payload_type, OuchInboundFrame> || std::is_same_v<payload_type, OuchOutboundFrame>)) ||
     (std::is_same_v<transport_type, UDPHeader> && std::is_same_v<payload_type, ITCH>);
 
 
@@ -69,8 +73,9 @@ private:
     static rte_udp_hdr *append_udp(dpdk::packet &pkt, const transport_type &transport_payload);
     static rte_tcp_hdr *append_tcp(dpdk::packet &pkt, const transport_type &transport_payload);
 
-    static void append_ouch(dpdk::packet &pkt, const payload_type &payload);
-    static void append_itch(dpdk::packet &pkt, const payload_type &payload);
+    // Encodes payload straight into newly appended packet space. False if
+    // the pool's buffers are too small for it.
+    static bool append_payload(dpdk::packet &pkt, const payload_type &payload);
 };
 
 
@@ -92,12 +97,12 @@ dpdk::packet packet_factory<transport_type, payload_type>::build_packet(
 
     if constexpr (std::is_same_v<transport_type, TCPHeader>) {
         rte_tcp_hdr *tcp_hdr = append_tcp(pkt, transport_payload);
-        append_ouch(pkt, payload_payload);
+        if (!append_payload(pkt, payload_payload)) return {};
         dpdk::finalize_ipv4_header(pkt, ip_hdr);
         dpdk::finalize_tcp_header(pkt, ip_hdr, tcp_hdr);
     } else {
         rte_udp_hdr *udp_hdr = append_udp(pkt, transport_payload);
-        append_itch(pkt, payload_payload);
+        if (!append_payload(pkt, payload_payload)) return {};
         dpdk::finalize_ipv4_header(pkt, ip_hdr);
         dpdk::finalize_udp_header(pkt, ip_hdr, udp_hdr);
     }
@@ -125,18 +130,23 @@ rte_tcp_hdr *packet_factory<transport_type, payload_type>::append_tcp(
 
 template <typename transport_type, typename payload_type>
     requires ValidPacketCombo<transport_type, payload_type>
-void packet_factory<transport_type, payload_type>::append_ouch(
+bool packet_factory<transport_type, payload_type>::append_payload(
     dpdk::packet &pkt, const payload_type &payload)
 {
-    pkt.append(serialize_ouch(payload));
-}
+    const size_t len = encoded_size(payload);
+    if (len == 0) return true; // NONE payload: headers only
 
-template <typename transport_type, typename payload_type>
-    requires ValidPacketCombo<transport_type, payload_type>
-void packet_factory<transport_type, payload_type>::append_itch(
-    dpdk::packet &pkt, const payload_type &payload)
-{
-    pkt.append(serialize_itch(payload));
+    auto *dst = reinterpret_cast<std::byte *>(pkt.append(static_cast<uint16_t>(len)));
+    if (dst == nullptr) return false;
+
+    const std::span<std::byte> out{dst, len};
+    if constexpr (std::is_same_v<payload_type, OuchInboundFrame>) {
+        return encode_inbound_ouch(payload, out) == len;
+    } else if constexpr (std::is_same_v<payload_type, OuchOutboundFrame>) {
+        return encode_outbound_ouch(payload, out) == len;
+    } else {
+        return encode_itch(payload, out) == len;
+    }
 }
 
 template <typename transport_type, typename payload_type>
@@ -186,24 +196,29 @@ packet_factory<transport_type, payload_type>::deserialize_packet(const dpdk::pac
         std::is_same_v<transport_type, TCPHeader> ? sizeof(rte_tcp_hdr) : sizeof(rte_udp_hdr);
     constexpr size_t header_len = kEthernetHeaderLen + kIPv4HeaderLen + transport_hdr_len;
 
-    if (packet.length() < header_len) {
+    // The payload ends where IPv4 total_length says it does, not at the end
+    // of the frame: Ethernet pads short frames out to its 60-byte minimum,
+    // and those pad bytes would otherwise read as part of the message.
+    const size_t ip_end = kEthernetHeaderLen + ip.total_length;
+    if (ip_end < header_len || ip_end > packet.length()) {
         return result;
     }
 
     const std::span<const std::byte> transport_span{
         base + kEthernetHeaderLen + kIPv4HeaderLen, transport_hdr_len};
-    const std::span<const std::byte> payload_span{
-        base + header_len, static_cast<size_t>(packet.length() - header_len)};
+    const std::span<const std::byte> payload_span{base + header_len, ip_end - header_len};
 
     if constexpr (std::is_same_v<transport_type, TCPHeader>) {
         result.transport = deserialize_tcp(transport_span);
     } else {
         result.transport = deserialize_udp(transport_span);
     }
-    if constexpr (std::is_same_v<payload_type, OUCH>) {
-        result.payload = deserialize_ouch(payload_span);
+    if constexpr (std::is_same_v<payload_type, OuchInboundFrame>) {
+        result.payload = decode_inbound_ouch(payload_span);
+    } else if constexpr (std::is_same_v<payload_type, OuchOutboundFrame>) {
+        result.payload = decode_outbound_ouch(payload_span);
     } else {
-        result.payload = deserialize_itch(payload_span);
+        result.payload = decode_itch(payload_span);
     }
 
     result.src.mac = to_rte_ether_addr(eth.src_mac);

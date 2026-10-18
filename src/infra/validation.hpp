@@ -5,7 +5,10 @@
 #ifndef VALIDATION_H
 #define VALIDATION_H
 
-#include "protocol.hpp"
+#include "network_proto.hpp"
+#include "ouch_proto.hpp"
+#include "itch_proto.hpp"
+#include "communication_proto.hpp"
 
 namespace validation {
     // TODO:

@@ -5,13 +5,16 @@
 #ifndef UNTITLED_ORDERBOOK_H
 #define UNTITLED_ORDERBOOK_H
 
-#include <atomic>
-#include <thread>
-
 #include "orderbook.hpp"
 #include "ring_buffer.hpp"
-#include "communication_types.hpp"
+#include "network_proto.hpp"
+#include "ouch_proto.hpp"
+#include "itch_proto.hpp"
+#include "communication_proto.hpp"
 #include "config.hpp"
+
+#include <atomic>
+#include <thread>
 
 // The Engine is now a thin driver around an autonomous Orderbook. It owns the
 // inbound/outbound ring wiring, the matching thread, and OrderId assignment; it

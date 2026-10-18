@@ -12,7 +12,11 @@
 #ifndef UNTITLED_TYPES_H
 #define UNTITLED_TYPES_H
 
-#include "communication_types.hpp"
+#include "order_types.hpp"
+#include "network_proto.hpp"
+#include "ouch_proto.hpp"
+#include "itch_proto.hpp"
+#include "communication_proto.hpp"
 
 class OrderRequest {
     MessageType message_type;

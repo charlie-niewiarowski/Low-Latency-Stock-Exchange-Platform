@@ -5,12 +5,12 @@
 #ifndef RINGBUFFER_H
 #define RINGBUFFER_H
 
+#include "communication_proto.hpp"
+
 #include <memory>
 #include <atomic>
 #include <cassert>
 #include <optional>
-
-#include "communication_types.hpp"
 
 template <typename T>
 class RingBuffer {
@@ -110,7 +110,7 @@ size_t RingBuffer<T>::size() const {
     return (mask + 1) + (write_idx - read_idx);
 }
 
-using InboundRing = RingBuffer<InboundMessage>;
-using OutboundRing = RingBuffer<OutboundMessage>;
+using InboundRing = RingBuffer<InboundOuch>;
+using OutboundRing = RingBuffer<OutboundOuch>;
 
 #endif //RINGBUFFER_H

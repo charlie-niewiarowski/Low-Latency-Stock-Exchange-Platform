@@ -2,12 +2,12 @@
 // Created by charl on 11/25/2025.
 //
 
+#include "../include/engine.hpp"
+#include "perf.hpp"
+
 #include <immintrin.h>
 #include <iostream>
 #include <thread>
-
-#include "../include/engine.hpp"
-#include "perf.hpp"
 
 //=============================================================================
 // Forward-declared free forms

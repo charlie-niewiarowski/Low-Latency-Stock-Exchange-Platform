@@ -74,7 +74,7 @@ std::shared_ptr<dpdk::packet_pool> PacketFactoryTest::pool_;
 //=============================================================================
 // Happy path: build_packet -> deserialize_packet round-trips the sender's
 // endpoint (the whole point of the Ethernet/IPv4 deserialize work) and the
-// application payload (OUCH/ITCH, already-correct pre-existing code).
+// application payload (OUCH/ITCH; byte-level layout is covered by proto_tests).
 //=============================================================================
 
 TEST_F(PacketFactoryTest, TcpOuchLearnsSenderEndpointAndRoundtripsPayload) {
@@ -90,38 +90,36 @@ TEST_F(PacketFactoryTest, TcpOuchLearnsSenderEndpointAndRoundtripsPayload) {
     tcp.window = 4096;
 
     OuchEnterOrder enter{};
-    enter.order_token = OuchOrderToken{'O', 'R', 'D', 'R', '0', '0', '0', '1', ' ', ' ', ' ', ' ', ' ', ' '};
-    enter.buy_sell_indicator = 'B';
-    enter.shares = 100;
-    enter.stock = OuchStockSymbol{'A', 'A', 'P', 'L', ' ', ' ', ' ', ' '};
-    enter.price = 15025;
-    enter.time_in_force = 0;
-    enter.firm = OuchFirm{'A', 'B', 'C', 'D'};
+    enter.user_ref_num = 1;
+    enter.side = 'B';
+    enter.quantity = 100;
+    enter.symbol = OuchStockSymbol{'A', 'A', 'P', 'L', ' ', ' ', ' ', ' '};
+    enter.price = 150250000; // $15025.0000, 4 implied decimal places
+    enter.time_in_force = '0'; // Day
     enter.display = 'Y';
     enter.capacity = 'O';
     enter.intermarket_sweep_eligibility = 'N';
-    enter.minimum_quantity = 0;
     enter.cross_type = 'N';
-    enter.customer_type = 'R';
+    enter.cl_ord_id = OuchClOrdId{'O', 'R', 'D', 'R', '0', '0', '0', '1', ' ', ' ', ' ', ' ', ' ', ' '};
 
-    OUCH ouch{};
+    OuchInboundFrame ouch{};
     ouch.enter_order = enter;
 
-    dpdk::packet pkt = packet_factory<TCPHeader, OUCH>::build_packet(*pool_, client, server, tcp, ouch);
+    dpdk::packet pkt = packet_factory<TCPHeader, OuchInboundFrame>::build_packet(*pool_, client, server, tcp, ouch);
     ASSERT_TRUE(pkt);
 
-    const auto result = packet_factory<TCPHeader, OUCH>::deserialize_packet(pkt);
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
 
     EXPECT_EQ(result.src.ip, client.ip);
     EXPECT_TRUE(MacEquals(result.src.mac, client.mac));
 
-    EXPECT_EQ(result.payload.message_type, OuchMessageType::ENTER_ORDER);
-    EXPECT_EQ(result.payload.enter_order.buy_sell_indicator, enter.buy_sell_indicator);
-    EXPECT_EQ(result.payload.enter_order.shares, enter.shares);
+    EXPECT_EQ(result.payload.message_type, InboundOuchMessageType::ENTER_ORDER);
+    EXPECT_EQ(result.payload.enter_order.user_ref_num, enter.user_ref_num);
+    EXPECT_EQ(result.payload.enter_order.side, enter.side);
+    EXPECT_EQ(result.payload.enter_order.quantity, enter.quantity);
     EXPECT_EQ(result.payload.enter_order.price, enter.price);
-    EXPECT_EQ(result.payload.enter_order.order_token, enter.order_token);
-    EXPECT_EQ(result.payload.enter_order.stock, enter.stock);
-    EXPECT_EQ(result.payload.enter_order.firm, enter.firm);
+    EXPECT_EQ(result.payload.enter_order.symbol, enter.symbol);
+    EXPECT_EQ(result.payload.enter_order.cl_ord_id, enter.cl_ord_id);
 }
 
 TEST_F(PacketFactoryTest, UdpItchLearnsSenderEndpointAndRoundtripsPayload) {
@@ -135,7 +133,7 @@ TEST_F(PacketFactoryTest, UdpItchLearnsSenderEndpointAndRoundtripsPayload) {
     ItchAddOrder add{};
     add.header.stock_locate = 7;
     add.header.tracking_number = 42;
-    add.header.timestamp = {1, 2, 3, 4, 5, 6};
+    add.header.timestamp = 0x010203040506;
     add.order_reference_number = 123456789;
     add.buy_sell_indicator = 'S';
     add.shares = 250;
@@ -161,6 +159,33 @@ TEST_F(PacketFactoryTest, UdpItchLearnsSenderEndpointAndRoundtripsPayload) {
     EXPECT_EQ(result.payload.add_order.price, add.price);
 }
 
+// Bytes past the IPv4 total_length (e.g. Ethernet minimum-frame padding)
+// aren't part of the payload and must not be read as appendage bytes.
+TEST_F(PacketFactoryTest, IgnoresBytesPastIpv4TotalLength) {
+    const PacketEndpoint client = MakeEndpoint({0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01}, 0xC0A80101);
+    const PacketEndpoint server = MakeEndpoint({0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03}, 0x0A000005);
+
+    TCPHeader tcp{};
+    tcp.src_port = 4001;
+    tcp.dst_port = 4000;
+
+    OuchInboundFrame ouch{};
+    ouch.cancel_order = OuchCancelOrder{};
+    ouch.cancel_order.user_ref_num = 7;
+    ouch.cancel_order.quantity = 0;
+
+    dpdk::packet pkt = packet_factory<TCPHeader, OuchInboundFrame>::build_packet(*pool_, client, server, tcp, ouch);
+    ASSERT_TRUE(pkt);
+    const std::array<std::byte, 8> padding{};
+    ASSERT_NE(pkt.append(padding), nullptr);
+
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
+
+    ASSERT_EQ(result.payload.message_type, InboundOuchMessageType::CANCEL_ORDER);
+    EXPECT_EQ(result.payload.cancel_order.user_ref_num, 7u);
+    EXPECT_EQ(result.payload.cancel_order.quantity, 0u);
+}
+
 //=============================================================================
 // Malformed input: deserialize_packet must reject rather than misparse.
 // Each of these leaves DeserializedPacket at its default (src.ip == 0,
@@ -172,10 +197,10 @@ TEST_F(PacketFactoryTest, RejectsPacketTooShortForEthernetHeader) {
     dpdk::packet pkt = MakeRawPacket(tiny);
     ASSERT_TRUE(pkt);
 
-    const auto result = packet_factory<TCPHeader, OUCH>::deserialize_packet(pkt);
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
 
     EXPECT_EQ(result.src.ip, 0u);
-    EXPECT_EQ(result.payload.message_type, OuchMessageType::NONE);
+    EXPECT_EQ(result.payload.message_type, InboundOuchMessageType::NONE);
 }
 
 TEST_F(PacketFactoryTest, RejectsNonIpv4EtherType) {
@@ -183,10 +208,10 @@ TEST_F(PacketFactoryTest, RejectsNonIpv4EtherType) {
     dpdk::packet pkt = MakeRawPacket(bytes);
     ASSERT_TRUE(pkt);
 
-    const auto result = packet_factory<TCPHeader, OUCH>::deserialize_packet(pkt);
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
 
     EXPECT_EQ(result.src.ip, 0u);
-    EXPECT_EQ(result.payload.message_type, OuchMessageType::NONE);
+    EXPECT_EQ(result.payload.message_type, InboundOuchMessageType::NONE);
 }
 
 TEST_F(PacketFactoryTest, RejectsIpv4HeaderWithOptions) {
@@ -194,10 +219,10 @@ TEST_F(PacketFactoryTest, RejectsIpv4HeaderWithOptions) {
     dpdk::packet pkt = MakeRawPacket(bytes);
     ASSERT_TRUE(pkt);
 
-    const auto result = packet_factory<TCPHeader, OUCH>::deserialize_packet(pkt);
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
 
     EXPECT_EQ(result.src.ip, 0u);
-    EXPECT_EQ(result.payload.message_type, OuchMessageType::NONE);
+    EXPECT_EQ(result.payload.message_type, InboundOuchMessageType::NONE);
 }
 
 TEST_F(PacketFactoryTest, RejectsMismatchedIpProtocol) {
@@ -205,15 +230,15 @@ TEST_F(PacketFactoryTest, RejectsMismatchedIpProtocol) {
     dpdk::packet pkt = MakeRawPacket(bytes);
     ASSERT_TRUE(pkt);
 
-    const auto result = packet_factory<TCPHeader, OUCH>::deserialize_packet(pkt);
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
 
     EXPECT_EQ(result.src.ip, 0u);
-    EXPECT_EQ(result.payload.message_type, OuchMessageType::NONE);
+    EXPECT_EQ(result.payload.message_type, InboundOuchMessageType::NONE);
 }
 
 //=============================================================================
 // Known-broken transport header round-trip (not fixed here -- see
-// deserialize_tcp/deserialize_udp in protocol.hpp). DISABLED so the suite
+// deserialize_tcp/deserialize_udp in network_proto.hpp). DISABLED so the suite
 // stays green; these record the *correct* expected behavior, so fixing
 // deserialize_tcp/deserialize_udp to actually parse rte_tcp_hdr/rte_udp_hdr
 // (instead of memcpy'ing wire bytes straight into TCPHeader/UDPHeader's own,
@@ -233,12 +258,12 @@ TEST_F(PacketFactoryTest, DISABLED_TcpTransportHeaderRoundtrips) {
     tcp.flags = RTE_TCP_ACK_FLAG;
     tcp.window = 4096;
 
-    const OUCH ouch{}; // NONE payload -- only the transport header is under test
+    const OuchInboundFrame ouch{}; // NONE payload -- only the transport header is under test
 
-    dpdk::packet pkt = packet_factory<TCPHeader, OUCH>::build_packet(*pool_, client, server, tcp, ouch);
+    dpdk::packet pkt = packet_factory<TCPHeader, OuchInboundFrame>::build_packet(*pool_, client, server, tcp, ouch);
     ASSERT_TRUE(pkt);
 
-    const auto result = packet_factory<TCPHeader, OUCH>::deserialize_packet(pkt);
+    const auto result = packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(pkt);
 
     EXPECT_EQ(result.transport.src_port, tcp.src_port);
     EXPECT_EQ(result.transport.dst_port, tcp.dst_port);

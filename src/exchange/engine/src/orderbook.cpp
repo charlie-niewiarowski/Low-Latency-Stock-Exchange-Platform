@@ -5,10 +5,10 @@
 // now lives entirely inside the book, reached through process(OrderRequest).
 //
 
-#include <algorithm>
-
 #include "../include/orderbook.hpp"
 #include "perf.hpp"
+
+#include <algorithm>
 
 #if LOGGING
 #include <iostream>

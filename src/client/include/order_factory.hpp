@@ -22,7 +22,10 @@
 #define ORDER_FACTORY_H
 
 #include "communication_types.hpp"
-#include "protocol.hpp"
+#include "network_proto.hpp"
+#include "ouch_proto.hpp"
+#include "itch_proto.hpp"
+#include "communication_proto.hpp"
 #include "config.hpp"
 
 #include <random>

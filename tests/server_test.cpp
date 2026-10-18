@@ -12,8 +12,8 @@
 class ServerTest : public testing::Test {
 protected:
     ServerTest() : server_(
-            std::make_shared<RingBuffer<OUCH>>(RINGBUF_SIZE),
-                std::make_shared<RingBuffer<OUCH>>(RINGBUF_SIZE)),
+            std::make_shared<RingBuffer<InboundOuch>>(RINGBUF_SIZE),
+                std::make_shared<RingBuffer<OutboundOuch>>(RINGBUF_SIZE)),
             client_tx_queue_(server_.dpdk_port_.claim_tx_queue()),
             server_thread_(&Server::run, &server_) {}
 
@@ -54,3 +54,5 @@ TEST_F(ServerTest, test_receives_packets) {
         // do nothing
     }
 }
+
+

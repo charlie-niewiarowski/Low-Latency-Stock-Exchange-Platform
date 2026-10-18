@@ -18,7 +18,6 @@
 #include "order_request.hpp"
 #include "order_types.hpp"
 
-#include <cstddef>
 #include <vector>
 
 class OrderPool {

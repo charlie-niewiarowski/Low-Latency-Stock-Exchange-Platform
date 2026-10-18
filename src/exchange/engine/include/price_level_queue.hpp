@@ -11,8 +11,6 @@
 
 #include "order.hpp"
 
-#include <cstddef>
-
 class PriceLevelQueue {
 public:
     PriceLevelQueue() = default;

@@ -66,8 +66,16 @@ target_compile_definitions(server-tests PRIVATE TESTING=1)
 target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map GTest::gtest_main)
 gtest_discover_tests(server-tests)
 
+# ── proto ────────────────────────────────────────────────────────────────────
+# Pure OUCH/ITCH wire codecs (ouch_proto.hpp/itch_proto.hpp, header-only in
+# src/infra) -- no DPDK, no config, so nothing beyond infra + gtest.
+
+add_executable(proto-tests proto_tests.cpp)
+target_link_libraries(proto-tests PRIVATE infra GTest::gtest_main)
+gtest_discover_tests(proto-tests)
+
 # ── packet_factory ───────────────────────────────────────────────────────────
-# packet_factory.hpp/protocol.hpp (src/infra) talk to the DPDK runtime
+# packet_factory.hpp (src/infra) talk to the DPDK runtime
 # directly (packet_pool, ethernet/ipv4 header builders), so this target
 # links dpdk_lib alongside infra like server-tests does -- but it has no
 # TESTING-gated code path of its own (no config.hpp, no Server), so it
