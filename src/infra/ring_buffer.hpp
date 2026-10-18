@@ -6,6 +6,7 @@
 #define RINGBUFFER_H
 
 #include "communication_proto.hpp"
+#include "itch_proto.hpp"
 
 #include <memory>
 #include <atomic>
@@ -110,7 +111,12 @@ size_t RingBuffer<T>::size() const {
     return (mask + 1) + (write_idx - read_idx);
 }
 
-using InboundRing = RingBuffer<InboundOuch>;
-using OutboundRing = RingBuffer<OutboundOuch>;
+using InboundRing = RingBuffer<EngineRequest>;
+using OutboundRing = RingBuffer<EngineEvent>;
+
+// Engine -> market data dissemination. Until that consumer exists nothing
+// drains this ring, so the engine pushes best-effort and drops on full
+// rather than spinning (which would stall matching forever).
+using MarketDataRing = RingBuffer<ITCH>;
 
 #endif //RINGBUFFER_H

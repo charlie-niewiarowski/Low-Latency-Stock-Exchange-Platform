@@ -74,6 +74,11 @@ add_executable(proto-tests proto_tests.cpp)
 target_link_libraries(proto-tests PRIVATE infra GTest::gtest_main)
 gtest_discover_tests(proto-tests)
 
+# ── clock ────────────────────────────────────────────────────────────────────
+add_executable(clock-tests clock_tests.cpp)
+target_link_libraries(clock-tests PRIVATE infra GTest::gtest_main)
+gtest_discover_tests(clock-tests)
+
 # ── packet_factory ───────────────────────────────────────────────────────────
 # packet_factory.hpp (src/infra) talk to the DPDK runtime
 # directly (packet_pool, ethernet/ipv4 header builders), so this target
