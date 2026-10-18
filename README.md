@@ -7,8 +7,7 @@ they can't connect to each other yet: the exchange's DPDK gateway has no TCP sta
 
 ## Overview
 A price-time-priority order-matching engine written in C++23, built around a low-latency
-matching core (order pool arena, intrusive price-level queues, SPSC ring buffers), plus a
-load-generating client.
+matching core plus a load-generating client.
 
 - **Exchange** (`src/exchange`): a DPDK kernel-bypass gateway takes order entry as
   OUCH 5.0 over SoupBinTCP 3.00, validates it, and hands the matching engine compact
@@ -21,7 +20,7 @@ load-generating client.
   in over SoupBinTCP on kernel TCP and streams OUCH Enter/Cancel/Replace orders, keeping
   `PIPELINE_DEPTH` Enters in flight.
 
-Linux only — the gateway needs DPDK's EAL, the client uses `epoll`, and both pin threads
+Linux only because the gateway needs DPDK's EAL, the client uses `epoll`, and both pin threads
 with `pthread_setaffinity_np`.
 
 ## Limitations
@@ -84,21 +83,15 @@ Abseil's hash map.
 The `bench/` directory holds a suite of Python benchmarks that build, launch, and drive
 things for you, split into two families:
 
-| Script | Measures | Runs today? |
-|---|---|---|
-| `saturation` | Peak sustained req/s, sweeping client count (closed-loop) | No |
-| `latency_curve` | End-to-end latency percentiles vs offered load | No |
-| `stage_breakdown` | Per-stage latency histograms (`DIAGNOSTICS=1`) | No |
-| `regression` | Fixed-seed run checked against a stored baseline | No |
-| `ring_buffer` | `RingBuffer<T>` push/pop latency + throughput, in isolation | Yes |
-| `orderbook_perf` | Cache/branch-miss rate for `Orderbook::process()`, in isolation | Yes |
-| `perf_on_executable` | Generic `perf stat` wrapper for any executable | Yes |
-
-The first four run `build/exchange/exchange-release` and `build/client/client-release`
-together, so they need the two to connect, and they parse per-stage latency histograms
-the exchange doesn't print any more (`server/include/latency.hpp` isn't wired into the new
-gateway). `ring_buffer` and `orderbook_perf` build and run their own standalone
-executables (`bench/executables/ring_buffer_bench.cpp`, `orderbook_bench.cpp`):
+| Script | Measures | Currently Usable |
+|---|---|------------------|
+| `saturation` | Peak sustained req/s, sweeping client count (closed-loop) | No               |
+| `latency_curve` | End-to-end latency percentiles vs offered load | No               |
+| `stage_breakdown` | Per-stage latency histograms (`DIAGNOSTICS=1`) | No               |
+| `regression` | Fixed-seed run checked against a stored baseline | No               |
+| `ring_buffer` | `RingBuffer<T>` push/pop latency + throughput, in isolation | Yes              |
+| `orderbook_perf` | Cache/branch-miss rate for `Orderbook::process()`, in isolation | Yes              |
+| `perf_on_executable` | Generic `perf stat` wrapper for any executable | Yes              |
 
 ```bash
 python3 -m bench.scripts.ring_buffer op
