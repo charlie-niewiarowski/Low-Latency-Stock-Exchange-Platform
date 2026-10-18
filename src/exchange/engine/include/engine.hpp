@@ -7,22 +7,20 @@
 
 #include "orderbook.hpp"
 #include "ring_buffer.hpp"
-#include "network_proto.hpp"
-#include "ouch_proto.hpp"
-#include "itch_proto.hpp"
 #include "communication_proto.hpp"
 #include "config.hpp"
 
 #include <atomic>
 #include <thread>
 
-// The Engine is now a thin driver around an autonomous Orderbook. It owns the
-// inbound/outbound ring wiring, the matching thread, and OrderId assignment; it
-// translates each InboundMessage into an OrderRequest and routes it to book_.process().
+// The Engine is a thin driver around an autonomous Orderbook. It owns the
+// ring wiring and the matching thread, and hands each EngineRequest straight
+// to book_.process() (OrderIds are assigned by the gateway, not here).
 class Engine {
 
 public:
-    Engine(InboundRing& in_ring, OutboundRing& out_ring, std::atomic<bool>& stop);
+    Engine(InboundRing& in_ring, OutboundRing& out_ring, MarketDataRing& market_data_ring,
+           std::atomic<bool>& stop);
 
     Engine(const Engine& other) = delete;
     Engine& operator=(const Engine& rhs) = delete;
@@ -41,9 +39,7 @@ public:
     size_t bids_at(Price p)  const { return book_.bids_at(p); }
     size_t asks_at(Price p)  const { return book_.asks_at(p); }
     bool has_order(OrderId id) const { return book_.has_order(id); }
-    [[nodiscard]] std::optional<OutboundMessage> pop_outbound() { return out_ring_.pop(); }
-    [[nodiscard]] std::optional<Trade> pop_trade() { return book_.pop_trade(); }
-    OrderId next_order_id() const { return next_id_; }
+    [[nodiscard]] std::optional<EngineEvent> pop_outbound() { return out_ring_.pop(); }
     #endif // TESTING
 private:
     //===== threads ======
@@ -51,9 +47,6 @@ private:
 
     //===== the book ======
     Orderbook book_;
-
-    //===== id assignment ======
-    OrderId next_id_{0};
 
     //===== communication with server ======
     InboundRing& in_ring_;
@@ -66,12 +59,7 @@ private:
     void handleMatching();
 
     //===== request routing =====
-    void executeRequest(const InboundMessage &msg);
-
-    #if LOGGING
-    std::jthread expose_thread_;
-    void exposeTrades();
-    #endif
+    void executeRequest(const EngineRequest &req);
 };
 
 

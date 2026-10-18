@@ -23,6 +23,11 @@
 #define MIN_PRICE (1)           // the 100 is to include decimals since we are
 #define MAX_PRICE (1'000 * 100) // using uint32_t, so $10.25 = uint32_t(1025)
 
+// Every order lands in this one book regardless of the symbol it was entered
+// with (multi-symbol routing comes later); ITCH publishes it under this name.
+#define BOOK_SYMBOL "SIM"
+#define BOOK_STOCK_LOCATE 1
+
 #define MATCHING_CORE 1
 #define INBOUND_CORE 2
 #define OUTBOUND_CORE 3
@@ -34,7 +39,6 @@
 #define COMMUNICATION_RING_COUNT 524'288
 
 #define PREALLOCATION_COUNT 1'000'000
-#define TRADE_RING_COUNT COMMUNICATION_RING_COUNT // only relevant for logging == 1
 
 #define PORT "4000"
 #define MAX_CLIENTS 64

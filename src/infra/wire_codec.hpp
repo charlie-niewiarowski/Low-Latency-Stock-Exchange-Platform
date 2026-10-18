@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 //=============================================================================
@@ -44,6 +45,15 @@ template <typename T>
 inline constexpr size_t wire_size_v = sizeof(T); // no padding inside any WireField type
 
 inline constexpr size_t kU48Len = 6;
+
+// A fixed-width alpha field: left-justified, padded on the right with spaces,
+// truncated if s is longer than N.
+template <size_t N>
+constexpr std::array<char, N> alpha(const std::string_view s) noexcept {
+    std::array<char, N> out{};
+    for (size_t i = 0; i < N; ++i) out[i] = i < s.size() ? s[i] : ' ';
+    return out;
+}
 
 class WireSizer {
 public:
