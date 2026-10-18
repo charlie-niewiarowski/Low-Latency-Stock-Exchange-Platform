@@ -5,128 +5,154 @@
 #ifndef LATENCY_H
 #define LATENCY_H
 
-#include <chrono>
-#include <cstdio>
-#include <immintrin.h>
-#include <iostream>
-#include <thread>
-#include <vector>
-#include <hdr/hdr_histogram.h>
-
 #include "config.hpp"
 #include "order_types.hpp"
+#include "tsc_clock.hpp"
+
+#include <hdr/hdr_histogram.h>
+
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+
+//=============================================================================
+// Request latency through the exchange, t0..t7
+//=============================================================================
+// One sample per request, taken when the outbound thread hands the request's
+// answer -- the first event the engine produced for it (EngineEvent::
+// answers_request: ACCEPTED for an Enter, REPLACED or CANCELED for a Replace,
+// CANCELED for a Cancel) -- to the NIC. Fills, IOC remainders and the
+// counterparty's executions aren't sampled (they're fan-out of a request
+// already counted), nor are gateway rejects (they never reach the engine) or
+// engine rejects (an error path, not the latency being measured).
+//
+// Every stage boundary is a raw rdtsc, converted with TscClock:
+//   t0  inbound: before the rx burst poll that returned the request's packet
+//   t1  inbound: rx burst returned
+//   t2  inbound: request pushed onto the engine ring
+//   t3  engine:  request popped
+//   t4  engine:  answering event pushed (an Enter is answered by ACCEPTED,
+//                which goes out before matching -- so t3 -> t4 is time to
+//                acknowledge, not the whole match)
+//   t5  outbound: event popped
+//   t6  outbound: tx burst holding the reply begins
+//   t7  outbound: that tx burst has been fully handed to the NIC
+//
+// Recorded straight into HDR histograms as replies go out (no sample buffer,
+// so a run of any length is fully covered at fixed memory), after skipping
+// the first LATENCY_SAMPLE_DROP samples as warm-up. The end-to-end histogram
+// is always kept; the seven per-stage ones only with DIAGNOSTICS. Printed when
+// the handler is destroyed -- at exchange shutdown -- in the format
+// bench/scripts/benchlib.py parses (section titles contain " -> ").
 
 struct LatencySample {
-    Timestamp t0, // read begins  (before recv syscall)
-    t1, // read finished (after recv syscall)
-    t2, // pushed inbound ring
-    t3, // engine popped inbound ring
-    t4, // engine pushed outbound ring
-    t5, // server popped outbound ring
-    t6, // write begins  (before send syscall)
-    t7; // write finished (after send syscall)
+    Timestamp t0, t1, t2, t3, t4, t5, t6, t7; // see above
 };
 
-//=============================================================================
-// PendingLatency  (SPSC channel element: inbound thread → outbound thread)
-//=============================================================================
-
+// What the outbound thread knows about a sample before its reply is sent
+// (t6/t7 come from the tx burst that carries it).
 struct PendingLatency {
-    Timestamp read_begin_tsc;   // t0 - always set
-    Timestamp recv_tsc;         // t1 - set under DIAGNOSTICS
-    Timestamp server_push_tsc;  // t2 - set under DIAGNOSTICS
-    Timestamp engine_pop_tsc;   // t3 - set under DIAGNOSTICS
-    Timestamp engine_push_tsc;  // t4 - set under DIAGNOSTICS
-    Timestamp server_pop;       // t5 - set under DIAGNOSTICS
-    bool record;
+    Timestamp t0, t1, t2, t3, t4, t5;
 };
 
 class LatencyHandler {
 public:
-    LatencyHandler() {
-        samples_.resize(LATENCY_SAMPLE_COUNT); // resize (not reserve) so operator[] into valid slots
-
-        const Timestamp tsc1 = __rdtsc();
-        const auto wall1 = std::chrono::steady_clock::now();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        const Timestamp tsc2 = __rdtsc();
-        const auto wall2 = std::chrono::steady_clock::now();
-
-        ticks_per_ns_ = static_cast<double>(tsc2 - tsc1) /
-            static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(wall2 - wall1).count());
+    LatencyHandler() : clock_(TscClock::instance()) {
+        for (hdr_histogram *&h : histograms_) {
+            hdr_init(1, kMaxTrackableNs, 3, &h);
+        }
     }
 
+    LatencyHandler(const LatencyHandler &) = delete;
+    LatencyHandler &operator=(const LatencyHandler &) = delete;
+
     ~LatencyHandler() {
-        if (count_ == 0) {
-            std::cout << "LatencyHandler: no samples collected\n";
+        print();
+        for (hdr_histogram *h : histograms_) {
+            hdr_close(h);
+        }
+    }
+
+    // Outbound thread only.
+    void record(const LatencySample &s) {
+        const uint64_t seen = seen_.load(std::memory_order_relaxed) + 1;
+        seen_.store(seen, std::memory_order_relaxed);
+        if (seen <= LATENCY_SAMPLE_DROP) return;
+        recorded_.store(recorded_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+
+        record_(kEndToEnd, s.t0, s.t7);
+#if DIAGNOSTICS
+        record_(kRxBurst,        s.t0, s.t1);
+        record_(kInboundThread,  s.t1, s.t2);
+        record_(kInboundRing,    s.t2, s.t3);
+        record_(kEngine,         s.t3, s.t4);
+        record_(kOutboundRing,   s.t4, s.t5);
+        record_(kOutboundThread, s.t5, s.t6);
+        record_(kTxBurst,        s.t6, s.t7);
+#endif
+    }
+
+    // Readable from any thread (tests); the outbound thread is the only writer.
+    [[nodiscard]] uint64_t samples_seen() const { return seen_.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t samples_recorded() const { return recorded_.load(std::memory_order_relaxed); }
+
+private:
+    enum Stage : size_t {
+        kEndToEnd, kRxBurst, kInboundThread, kInboundRing, kEngine, kOutboundRing, kOutboundThread, kTxBurst,
+        kStageCount,
+    };
+
+    // Titles are matched by bench/scripts/benchlib.py's SECTION_ORDER -- change both together.
+    static constexpr std::array<const char *, kStageCount> kTitles{
+        "begin read -> end write   (end-to-end)",
+        "begin read -> end read    (rx burst)",
+        "end read -> push inbound  (inbound thread)",
+        "push inbound -> engine pop (ring transit)",
+        "engine pop -> engine push (engine processing)",
+        "engine push -> server pop (ring transit)",
+        "pop outbound -> begin write (outbound thread)",
+        "begin write -> end write  (tx burst)",
+    };
+
+    static constexpr int64_t kMaxTrackableNs = 1'000'000'000; // 1 s; anything longer is clamped
+
+    void record_(const Stage stage, const Timestamp from, const Timestamp to) {
+        // Invariant TSC keeps cores in step, so to < from shouldn't happen; clamp rather than wrap.
+        const int64_t ns = to > from ? static_cast<int64_t>(clock_.ticks_to_ns(to - from)) : 0;
+        hdr_record_value(histograms_[stage], ns < kMaxTrackableNs ? ns : kMaxTrackableNs);
+    }
+
+    void print() const {
+        if (samples_recorded() == 0) {
+            std::printf("LatencyHandler: no samples collected (%llu seen, first %llu dropped as warm-up)\n",
+                        static_cast<unsigned long long>(samples_seen()),
+                        static_cast<unsigned long long>(LATENCY_SAMPLE_DROP));
             return;
         }
 
-        hdr_histogram *end_to_end;
-        hdr_init(1, 1'000'000'000, 5, &end_to_end);
-
+        print_hist(histograms_[kEndToEnd], kTitles[kEndToEnd]);
 #if DIAGNOSTICS
-        hdr_histogram *recv_syscall, *inbound_push, *inbound_ring,
-                       *engine_proc, *outbound_ring, *outbound_proc, *write_syscall;
-        hdr_init(1, 1'000'000'000, 5, &recv_syscall);
-        hdr_init(1, 1'000'000'000, 5, &inbound_push);
-        hdr_init(1, 1'000'000'000, 5, &inbound_ring);
-        hdr_init(1, 1'000'000'000, 5, &engine_proc);
-        hdr_init(1, 1'000'000'000, 5, &outbound_ring);
-        hdr_init(1, 1'000'000'000, 5, &outbound_proc);
-        hdr_init(1, 1'000'000'000, 5, &write_syscall);
-#endif
-
-        for (size_t i{LATENCY_SAMPLE_DROP}; i < count_; ++i) {
-            const auto& s = samples_[i];
-            hdr_record_value(end_to_end, calc_latency(s.t0, s.t7));
-#if DIAGNOSTICS
-            hdr_record_value(recv_syscall,  calc_latency(s.t0, s.t1));
-            hdr_record_value(inbound_push,  calc_latency(s.t1, s.t2));
-            hdr_record_value(inbound_ring,  calc_latency(s.t2, s.t3));
-            hdr_record_value(engine_proc,   calc_latency(s.t3, s.t4));
-            hdr_record_value(outbound_ring, calc_latency(s.t4, s.t5));
-            hdr_record_value(outbound_proc, calc_latency(s.t5, s.t6));
-            hdr_record_value(write_syscall, calc_latency(s.t6, s.t7));
-#endif
+        for (size_t stage = kRxBurst; stage < kStageCount; ++stage) {
+            print_hist(histograms_[stage], kTitles[stage]);
         }
-
-        print_hist(end_to_end,    "begin read -> end write   (end-to-end)");
-#if DIAGNOSTICS
-        print_hist(recv_syscall,  "begin read -> end read    (recv syscall)");
-        print_hist(inbound_push,  "end read -> push inbound  (inbound thread)");
-        print_hist(inbound_ring,  "push inbound -> engine pop (ring transit)");
-        print_hist(engine_proc,   "engine pop -> engine push (engine processing)");
-        print_hist(outbound_ring, "engine push -> server pop (ring transit)");
-        print_hist(outbound_proc, "pop outbound -> begin write (outbound thread)");
-        print_hist(write_syscall, "begin write -> end write  (send syscall)");
 #endif
+        std::fflush(stdout);
     }
 
-    void push_sample(const LatencySample& sample) {
-        if (count_ < samples_.size()) { // guard against overflow past LATENCY_SAMPLE_COUNT
-            samples_[count_++] = sample;
-        }
-    }
-
-private:
-    std::vector<LatencySample> samples_;
-    size_t count_{};
-    double ticks_per_ns_{};
-
-    [[nodiscard]] int64_t calc_latency(const Timestamp t1, const Timestamp t2) const {
-        const int64_t diff{static_cast<int64_t>(t2 - t1)};
-        return diff / static_cast<int64_t>(ticks_per_ns_);
-    }
-
-    static void print_hist(hdr_histogram* h, const char* title) {
+    static void print_hist(const hdr_histogram *h, const char *title) {
         static constexpr double      pcts[]   = {50.0, 90.0, 99.0, 99.9, 99.99, 100.0};
-        static constexpr const char* labels[] = {"p50   ", "p90   ", "p99   ", "p99.9 ", "p99.99", "max   "};
+        static constexpr const char *labels[] = {"p50   ", "p90   ", "p99   ", "p99.9 ", "p99.99", "max   "};
         std::printf("\n%s\n", title);
         for (int i = 0; i < 6; ++i)
             std::printf("  %s  %6lld ns\n", labels[i],
                         static_cast<long long>(hdr_value_at_percentile(h, pcts[i])));
     }
+
+    const TscClock &clock_;
+    std::array<hdr_histogram *, kStageCount> histograms_{};
+    std::atomic<uint64_t> seen_{0};
+    std::atomic<uint64_t> recorded_{0};
 };
 
 #endif //LATENCY_H

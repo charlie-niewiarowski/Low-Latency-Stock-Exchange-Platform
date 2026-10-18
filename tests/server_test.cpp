@@ -9,6 +9,8 @@
 
 #include "server.hpp"
 
+#include <immintrin.h>
+
 #include <array>
 #include <chrono>
 #include <optional>
@@ -172,6 +174,8 @@ protected:
 
     static void EngineSend(const EngineEvent &event) { ASSERT_TRUE(outbound_ring_->push(event)); }
 
+    static const LatencyHandler &Latency() { return server_->latency_; }
+
     static inline std::shared_ptr<InboundRing> inbound_ring_;
     static inline std::shared_ptr<OutboundRing> outbound_ring_;
     static inline std::unique_ptr<Server> server_;
@@ -303,6 +307,34 @@ TEST_F(ServerTest, EnterIsTranslatedAndAcceptedBackToTheClient) {
     EXPECT_EQ(ouch.order_accepted.quantity, 500u);
     EXPECT_EQ(ouch.order_accepted.price, 1'502'500u);
     EXPECT_EQ(ouch.order_accepted.cl_ord_id, wire::alpha<14>("ORDER"));
+}
+
+TEST_F(ServerTest, OneLatencySamplePerAnsweredRequest) {
+    constexpr uint16_t kPort = 50401;
+    ASSERT_TRUE(Login(kPort));
+    ASSERT_TRUE(Send(Enter(1, 'B', 500, 1'502'500), kPort));
+    const auto request = EngineReceive();
+    ASSERT_TRUE(request);
+
+    const uint64_t before = Latency().samples_seen();
+
+    // The answer, then a fill: only the answer is a sample.
+    EngineEvent accepted{.order_id = request->order_id, .client_id = request->client_id, .price = 15'025,
+                         .quantity = 500, .type = EngineEventType::ACCEPTED, .answers_request = true};
+    accepted.read_begin_tsc  = request->read_begin_tsc;
+    accepted.recv_tsc        = request->recv_tsc;
+    accepted.server_push_tsc = request->server_push_tsc;
+    accepted.engine_pop_tsc  = __rdtsc();
+    accepted.engine_push_tsc = __rdtsc();
+    EngineSend(accepted);
+    EngineSend(EngineEvent{.order_id = request->order_id, .match_number = 1, .client_id = request->client_id,
+                           .price = 15'025, .quantity = 100, .type = EngineEventType::EXECUTED,
+                           .reason = engine_reason::kAddedLiquidity});
+
+    ASSERT_TRUE(Receive());
+    ASSERT_TRUE(Receive());
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // recorded after the burst returns
+    EXPECT_EQ(Latency().samples_seen(), before + 1);
 }
 
 TEST_F(ServerTest, InvalidEnterIsRejectedWithoutReachingTheEngine) {

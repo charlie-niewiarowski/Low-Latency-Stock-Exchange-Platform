@@ -54,8 +54,9 @@ static_assert(sizeof(EngineRequest) == 56);
 // Every event is about one order and goes to that order's owner. A request
 // can produce several (e.g. an aggressive NEW: ACCEPTED, then one EXECUTED
 // per fill, then CANCELED for an IOC remainder), and the counterparty of
-// each fill gets its own EXECUTED. Requests the Nasdaq spec says to ignore
-// silently (cancel of a dead order, replace of a dead order) produce none.
+// each fill gets its own EXECUTED; the first one is flagged answers_request.
+// Requests the Nasdaq spec says to ignore silently (cancel of a dead order,
+// replace of a dead order) produce none.
 enum class EngineEventType : uint8_t { ACCEPTED = 0, REPLACED = 1, CANCELED = 2, EXECUTED = 3, REJECTED = 4 };
 
 // EngineEvent::reason values.
@@ -87,7 +88,9 @@ struct EngineEvent { // engine -> gateway
                                 //                   decremented (incremental); EXECUTED: shares filled
     EngineEventType type;       // 1 byte   @ 76
     char reason;                // 1 byte   @ 77  |  see engine_reason
-    uint8_t padding[2];         // 2 bytes  @ 78
+    bool answers_request;       // 1 byte   @ 78  |  the first event its request produced -- the
+                                //                   one that answers it (see latency.hpp)
+    uint8_t padding[1];         // 1 byte   @ 79
 }; // 80 bytes
 static_assert(sizeof(EngineEvent) == 80);
 

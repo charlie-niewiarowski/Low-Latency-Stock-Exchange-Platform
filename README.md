@@ -109,7 +109,7 @@ All compile-time configuration lives in header files. A rebuild is required afte
 
 | Macro | Default | Description |
 |---|---|---|
-| `DIAGNOSTICS` | `1` | Print thread ids at startup (latency stamps are always collected) |
+| `DIAGNOSTICS` | `1` | Print thread ids at startup, and per-stage latency histograms at shutdown (the end-to-end histogram is always printed) |
 | `TESTING` | `0` | Expose `Engine`/`Orderbook` inspection accessors and the server's test queues (overridden to `1` for `engine-tests`, `server-tests` and `orderbook-bench`) |
 | `PREFETCH` | `1` | Software prefetch hints on the matching hot path; set `0` to compile them out |
 | `MIN_PRICE` | `1` | Lowest price the book holds, in cents (its tick); OUCH prices outside the band, or sub-penny, are rejected |
@@ -124,9 +124,7 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | `COMMUNICATION_RING_COUNT` | `524288` | Size of each SPSC ring: engine in/out, gateway notes, market data |
 | `PREALLOCATION_COUNT` | `1000000` | `OrderPool` arena capacity / `OrderMap` reserve |
 | `RINGBUF_SIZE` | `512` | Engine ring capacity used by `server-tests` |
-
-`LATENCY_SAMPLE_DROP`/`LATENCY_SAMPLE_COUNT` configure `server/include/latency.hpp`,
-which isn't wired into the DPDK gateway yet.
+| `LATENCY_SAMPLE_DROP` | `5` | Answered requests skipped as warm-up before latency histograms start recording |
 
 ### Client: `src/client/config/config.hpp`
 

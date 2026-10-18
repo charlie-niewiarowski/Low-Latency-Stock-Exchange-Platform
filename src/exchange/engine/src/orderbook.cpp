@@ -347,6 +347,8 @@ void Orderbook::emit(const Context& ctx, EngineEvent event) {
     event.recv_tsc        = ctx.req.recv_tsc;
     event.server_push_tsc = ctx.req.server_push_tsc;
     event.engine_pop_tsc  = ctx.engine_pop_tsc;
+    event.answers_request = !ctx.answered;
+    ctx.answered          = true;
     event.engine_push_tsc = __rdtsc();
     while (!out_ring_.push(event)) {}
 }

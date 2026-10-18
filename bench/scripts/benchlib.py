@@ -60,13 +60,13 @@ PCTS = ["p50", "p90", "p99", "p99.9", "p99.99", "max"]
 
 SECTION_ORDER = [
     "begin read -> end write   (end-to-end)",
-    "begin read -> end read    (recv syscall)",
+    "begin read -> end read    (rx burst)",
     "end read -> push inbound  (inbound thread)",
     "push inbound -> engine pop (ring transit)",
     "engine pop -> engine push (engine processing)",
     "engine push -> server pop (ring transit)",
     "pop outbound -> begin write (outbound thread)",
-    "begin write -> end write  (send syscall)",
+    "begin write -> end write  (tx burst)",
 ]
 
 END_TO_END = SECTION_ORDER[0]
@@ -496,6 +496,6 @@ def warn_no_samples(res: RunResult) -> bool:
     """True (with a warning) if the exchange collected no latency samples."""
     if "no samples collected" in res.exchange_stdout:
         print("  [WARN] exchange collected 0 latency samples — increase --duration "
-              "or --clients so traffic exceeds LATENCY_SAMPLE_DROP (100k).")
+              "or --clients so traffic exceeds LATENCY_SAMPLE_DROP.")
         return True
     return False
