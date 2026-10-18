@@ -92,6 +92,7 @@ private:
         const EngineRequest& req;
         Timestamp engine_pop_tsc;
         uint64_t  itch_timestamp; // ns since midnight
+        mutable bool answered = false; // set by the request's first emit()
     };
 
     //===== data containers + facilitating members ======

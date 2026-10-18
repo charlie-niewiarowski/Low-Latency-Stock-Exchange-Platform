@@ -6,6 +6,7 @@
 #define TOYEXCHANGE_ORDERGATEWAY_HPP
 
 #include "config.hpp"
+#include "latency.hpp"
 #include "order_entry.hpp"
 #include "ouch_responder.hpp"
 #include "soupbintcp_proto.hpp"
@@ -94,6 +95,7 @@ private:
     OrderEntry order_entry_{validation::PriceBand{.min = MIN_PRICE, .max = MAX_PRICE}};
     // Outbound-thread only.
     OuchResponder responder_;
+    LatencyHandler latency_; // prints its histograms when the Server is destroyed
 
     // Indexed by ClientId. Written by inbound_ exactly once per client, on
     // its first packet, and before anything from that client is pushed to

@@ -8,6 +8,7 @@
 
 #include <immintrin.h>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <thread>
 #include <utility>
@@ -263,23 +264,36 @@ void Server::outbound_() {
     const TscClock &clock = TscClock::instance();
 
     std::array<dpdk::packet, kTxBurst> burst;
+    // burst[i]'s latency sample, if it carries a request's answer (see latency.hpp).
+    std::array<std::optional<PendingLatency>, kTxBurst> burst_latency;
     size_t staged = 0;
 
     // Sends everything staged, retrying whatever the NIC didn't take. Only
-    // shutdown can leave packets unsent; they're dropped (freed) then.
+    // shutdown can leave packets unsent; they're dropped (freed) then, and
+    // their latency samples with them.
     const auto flush = [&] {
+        const Timestamp t6 = __rdtsc();
         std::span<dpdk::packet> pending{burst.data(), staged};
         while (!pending.empty() && !shutdown_.load()) {
             pending = pending.subspan(tx_queue_->send_burst(pending));
         }
-        for (dpdk::packet &packet : std::span{burst.data(), staged}) {
-            packet = dpdk::packet{};
+        const Timestamp t7 = __rdtsc();
+
+        for (size_t i = 0; i < staged; ++i) {
+            if (burst_latency[i] && pending.empty()) {
+                const PendingLatency &l = *burst_latency[i];
+                latency_.record({l.t0, l.t1, l.t2, l.t3, l.t4, l.t5, t6, t7});
+            }
+            burst_latency[i].reset();
+            burst[i] = dpdk::packet{};
         }
         staged = 0;
     };
 
-    // One SoupBinTCP packet to one client, in its own TCP segment.
-    const auto send = [&](const ClientId client_id, const std::span<const std::byte> soup) {
+    // One SoupBinTCP packet to one client, in its own TCP segment. latency is
+    // the sample to record once it's on the wire, if it answers a request.
+    const auto send = [&](const ClientId client_id, const std::span<const std::byte> soup,
+                          const PendingLatency *latency = nullptr) {
         const ClientEndpoint &endpoint = endpoints_[client_id];
         const TCPHeader tcp{.src_port = endpoint.local_port, .dst_port = endpoint.remote_port,
                             .flags = RTE_TCP_PSH_FLAG | RTE_TCP_ACK_FLAG};
@@ -298,19 +312,20 @@ void Server::outbound_() {
         if (!packet) return;
 
         outbound_sessions_[client_id].last_sent_tsc = __rdtsc();
+        if (latency != nullptr) burst_latency[staged] = *latency;
         burst[staged++] = std::move(packet);
         if (staged == burst.size()) flush();
     };
 
     std::array<std::byte, kMaxSoupPacket> scratch{};
 
-    const auto send_ouch = [&](const OuchResponse &response) {
+    const auto send_ouch = [&](const OuchResponse &response, const PendingLatency *latency = nullptr) {
         OutboundSession &session = outbound_sessions_[response.client_id];
         if (!session.logged_in) return; // no session to deliver into (no replay yet)
         const size_t len = encode_soup_sequenced(response.ouch, scratch);
         if (len == 0) return;
         ++session.next_sequence_number;
-        send(response.client_id, std::span{scratch}.first(len));
+        send(response.client_id, std::span{scratch}.first(len), latency);
     };
 
     const auto handle_note = [&](const GatewayNote &note) {
@@ -364,11 +379,19 @@ void Server::outbound_() {
         drain_notes(); // also how gateway rejects and logins go out with no engine event behind them
 
         while (const auto event = outbound_ring_->pop()) {
+            const Timestamp t5 = __rdtsc();
             // The note for this event's order may have landed after the
             // drain above (it's always pushed before the request, so it's
             // there by now).
             drain_notes();
-            if (const auto response = responder_.on_event(*event, clock.ns_since_midnight(event->engine_push_tsc))) {
+            const auto response = responder_.on_event(*event, clock.ns_since_midnight(event->engine_push_tsc));
+            if (!response) continue;
+
+            if (event->answers_request && event->type != EngineEventType::REJECTED) {
+                const PendingLatency latency{event->read_begin_tsc, event->recv_tsc, event->server_push_tsc,
+                                             event->engine_pop_tsc, event->engine_push_tsc, t5};
+                send_ouch(*response, &latency);
+            } else {
                 send_ouch(*response);
             }
         }

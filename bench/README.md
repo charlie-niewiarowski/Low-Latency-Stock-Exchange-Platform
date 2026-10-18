@@ -129,9 +129,10 @@ SIGINT/SIGTERM — the source tree is always left byte-for-byte unchanged.
 ## Caveats
 
 - **Latency warm-up**: the exchange discards the first `LATENCY_SAMPLE_DROP`
-  (100k) samples before recording. A run that never exceeds that (short and/or
-  emulated) reports 0-ns percentiles; the scripts warn when the exchange collected
-  no samples at all. Use native Linux with enough load/duration for real numbers.
+  samples (one per answered request) before recording every request after that
+  into its histograms. A run that never gets past the warm-up prints "no samples
+  collected", and the scripts warn about it. Use native Linux with enough
+  load/duration for real numbers.
 - **Baselines are environment-specific**: generate `regression` baselines on the
   machine you intend to gate on (a docker/emulated baseline is not comparable to a
   native one).

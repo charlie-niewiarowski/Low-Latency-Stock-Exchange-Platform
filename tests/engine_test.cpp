@@ -373,6 +373,36 @@ TEST_F(OrderbookTest, IgnoredReplaces) {
 }
 
 //=============================================================================
+// answers_request -- exactly one event per request is its answer
+//=============================================================================
+
+TEST_F(OrderbookTest, OnlyTheFirstEventOfARequestAnswersIt) {
+    Setup(New(1, kAlice, Side::ASK, 1000, 50));
+    Setup(New(2, kAlice, Side::ASK, 1001, 50));
+
+    // ACCEPTED, then two fills per level, then an IOC remainder.
+    ASSERT_TRUE(Send(New(3, kBob, Side::BID, 1001, 150, TimeInForce::IOC)));
+    const auto aggressive = Events();
+    ASSERT_EQ(aggressive.size(), 6u);
+    EXPECT_TRUE(aggressive[0].answers_request);
+    EXPECT_EQ(aggressive[0].type, EngineEventType::ACCEPTED);
+    for (size_t i = 1; i < aggressive.size(); ++i) {
+        EXPECT_FALSE(aggressive[i].answers_request) << i;
+    }
+
+    Setup(New(4, kAlice, Side::BID, 990, 100));
+    ASSERT_TRUE(Send(Replace(4, 5, kAlice, 995, 100)));
+    const auto replaced = Events();
+    ASSERT_EQ(replaced.size(), 1u);
+    EXPECT_TRUE(replaced[0].answers_request);
+
+    ASSERT_TRUE(Send(Cancel(5, kAlice, 0)));
+    const auto canceled = Events();
+    ASSERT_EQ(canceled.size(), 1u);
+    EXPECT_TRUE(canceled[0].answers_request);
+}
+
+//=============================================================================
 // market data backpressure
 //=============================================================================
 

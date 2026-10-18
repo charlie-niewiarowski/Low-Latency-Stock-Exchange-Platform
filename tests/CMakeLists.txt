@@ -65,7 +65,7 @@ target_include_directories(server-tests PRIVATE ${SERVER_TEST_INCLUDES})
 # TESTING=1 switches Server's EAL bring-up (server.cpp) to a software-only
 # vdev instead of assuming a real hugepage-backed, PCI-bound NIC.
 target_compile_definitions(server-tests PRIVATE TESTING=1)
-target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map GTest::gtest_main)
+target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map hdr_histogram_static GTest::gtest_main)
 # Each discovered test is its own process, and two EALs at once collide on
 # DPDK's runtime files: serialize everything that brings one up.
 gtest_discover_tests(server-tests PROPERTIES RESOURCE_LOCK dpdk_eal)

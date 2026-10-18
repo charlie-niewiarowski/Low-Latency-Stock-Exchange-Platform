@@ -9,7 +9,8 @@
 // user-level macros (feel free to tinker around)
 //=============================================================================
 
-#define DIAGNOSTICS 1 // print thread ids at startup
+#define DIAGNOSTICS 1 // print thread ids at startup, and per-stage latency histograms
+                      // (latency.hpp) at shutdown on top of the always-on end-to-end one
 
 #ifndef TESTING
 #define TESTING 0 // overridable at compile time (see tests/CMakeLists.txt), so the
@@ -48,9 +49,8 @@
 // the test plays the engine and drains them itself.
 #define RINGBUF_SIZE 512
 
-// Latency sampling for server/include/latency.hpp (not yet wired into the
-// DPDK gateway): cold-start samples dropped, then samples collected.
+// Requests answered before latency.hpp starts recording, so cold-start
+// effects (page faults, cache warm-up) stay out of the histograms.
 #define LATENCY_SAMPLE_DROP 5
-#define LATENCY_SAMPLE_COUNT (2000 + LATENCY_SAMPLE_DROP)
 
 #endif //UNTITLED_MACROS_H
