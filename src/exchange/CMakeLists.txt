@@ -47,6 +47,7 @@ set(EXCHANGE_SOURCES
         engine/src/engine.cpp
         engine/src/orderbook.cpp
         server/src/server.cpp
+        server/src/order_entry.cpp
 )
 
 # Release

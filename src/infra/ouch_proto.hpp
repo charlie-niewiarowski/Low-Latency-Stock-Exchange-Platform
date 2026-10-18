@@ -66,6 +66,21 @@ using OuchAiqGroupId   = std::array<char, 2>;
 inline constexpr uint64_t kOuchMaxLimitPrice    = 1'999'999'900; // $199,999.9900
 inline constexpr uint64_t kOuchMarketPriceFloor = 2'000'000'000; // $200,000.0000
 
+// Order Rejected reason codes (Appendix C) this exchange produces.
+namespace ouch_reject {
+    inline constexpr uint16_t kInvalidDisplay     = 0x0003;
+    inline constexpr uint16_t kInvalidMaxFloor    = 0x0004;
+    inline constexpr uint16_t kInvalidPegType     = 0x0005;
+    inline constexpr uint16_t kIsoNotAllowed      = 0x0008;
+    inline constexpr uint16_t kInvalidSide        = 0x0009;
+    inline constexpr uint16_t kProcessingError    = 0x000A;
+    inline constexpr uint16_t kInvalidMinQuantity = 0x000D;
+    inline constexpr uint16_t kOther              = 0x000F;
+    inline constexpr uint16_t kInvalidQuantity    = 0x0013;
+    inline constexpr uint16_t kInvalidCrossOrder  = 0x0014;
+    inline constexpr uint16_t kInvalidPrice       = 0x001D;
+} // namespace ouch_reject
+
 // OptionTag values, Appendix A.
 enum class OuchTag : uint8_t {
     SECONDARY_ORD_REF_NUM = 1,

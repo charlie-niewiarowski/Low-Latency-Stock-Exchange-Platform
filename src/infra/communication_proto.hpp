@@ -6,7 +6,6 @@
 #define COMMUNICATION_PROTO_H
 
 #include "order_types.hpp"
-#include "ouch_proto.hpp"
 
 #include <cstdint>
 
@@ -91,34 +90,5 @@ struct EngineEvent { // engine -> gateway
     uint8_t padding[2];         // 2 bytes  @ 78
 }; // 80 bytes
 static_assert(sizeof(EngineEvent) == 80);
-
-//=============================================================================
-// Legacy full-frame messages -- still what Server pushes/pops; removed once
-// Server moves to EngineRequest/EngineEvent.
-//=============================================================================
-
-struct InboundOuch { // gateway -> engine
-    Timestamp read_begin_tsc;
-    Timestamp recv_tsc;
-    Timestamp server_push_tsc;
-
-    OrderId  order_id;
-    ClientId client_id;
-
-    OuchInboundFrame ouch;
-};
-
-struct OutboundOuch { // engine -> gateway
-    Timestamp read_begin_tsc;
-    Timestamp recv_tsc;
-    Timestamp server_push_tsc;
-    Timestamp engine_pop_tsc;
-    Timestamp engine_push_tsc;
-
-    OrderId  order_id;
-    ClientId client_id;
-
-    OuchOutboundFrame ouch;
-};
 
 #endif //COMMUNICATION_PROTO_H

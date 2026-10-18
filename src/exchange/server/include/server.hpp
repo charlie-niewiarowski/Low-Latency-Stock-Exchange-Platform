@@ -8,6 +8,7 @@
 #include <condition_variable>
 
 #include "config.hpp"
+#include "order_entry.hpp"
 
 #include <runtime.h>
 #include <packet_factory.hpp>
@@ -33,8 +34,8 @@ class Server {
 
 public:
     Server() = delete;
-    explicit Server(std::shared_ptr<RingBuffer<InboundOuch>> inbound_ring,
-                    std::shared_ptr<RingBuffer<OutboundOuch>> outbound_ring);
+    explicit Server(std::shared_ptr<InboundRing> inbound_ring,
+                    std::shared_ptr<OutboundRing> outbound_ring);
 
     Server(const Server &) = delete;
     Server(Server &&) = delete;
@@ -53,8 +54,14 @@ private:
     dpdk::runtime dpdk_runtime_;
     dpdk::port dpdk_port_;
 
-    std::shared_ptr<RingBuffer<InboundOuch>> inbound_ring_;
-    std::shared_ptr<RingBuffer<OutboundOuch>> outbound_ring_;
+    std::shared_ptr<InboundRing> inbound_ring_;
+    std::shared_ptr<OutboundRing> outbound_ring_;
+
+    // inbound_ -> outbound_ side channel; see GatewayNote.
+    RingBuffer<GatewayNote> notes_{COMMUNICATION_RING_COUNT};
+
+    // Inbound-thread only.
+    OrderEntry order_entry_{validation::PriceBand{.min = MIN_PRICE, .max = MAX_PRICE}};
 
     absl::flat_hash_map<ClientId, ClientEndpoint> client_endpoints_;
 
@@ -66,16 +73,7 @@ private:
     absl::flat_hash_map<uint64_t, ClientId> client_ids_;
     ClientId next_client_id_ = 1; // 0 reserved as "no client"
 
-    // (ClientId << 32 | UserRefNum) -> OrderId, so a later CANCEL_ORDER/
-    // REPLACE_ORDER (which only carry the client's own UserRefNum) can be
-    // translated to the engine's OrderId. Populated from the engine's
-    // acks in outbound_() -- not yet wired up there, so a cancel/replace
-    // referencing an order this server hasn't seen accepted yet resolves
-    // to order_id 0 and the engine will reject it as unknown.
-    absl::flat_hash_map<uint64_t, OrderId> order_registry_;
-
     ClientId resolve_client_id_(const PacketEndpoint &src, const TCPHeader &tcp);
-    OrderId resolve_order_id_(ClientId client_id, const OuchInboundFrame &ouch) const;
 
     std::atomic<bool> shutdown_;
 
