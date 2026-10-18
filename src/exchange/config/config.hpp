@@ -9,8 +9,7 @@
 // user-level macros (feel free to tinker around)
 //=============================================================================
 
-#define LOGGING 0
-#define DIAGNOSTICS 1
+#define DIAGNOSTICS 1 // print thread ids at startup
 
 #ifndef TESTING
 #define TESTING 0 // overridable at compile time (see tests/CMakeLists.txt), so the
@@ -40,25 +39,18 @@
 
 #define PREALLOCATION_COUNT 1'000'000
 
-#define PORT "4000"
-
 // SoupBinTCP session clients log into. Any username/password is accepted
 // for now; a Login Request naming another session is rejected.
 #define SOUP_SESSION "SIM"
 #define MAX_CLIENTS 64
 
-#define PIPELINE_DEPTH 32
-
-// Per-connection outbound staging ring capacity (must be a power of two).
-// Sized well above PIPELINE_DEPTH: a single incoming order can fan out into
-// many MATCH messages for one connection (one per resting order it sweeps),
-// so this has to absorb that burst, not just the request/response pipeline
-// depth. Overflowing this now condemns the connection as a slow consumer
-// (see Server::routeOutboundMessages) rather than silently dropping
-// messages, so it should only ever be hit by a genuinely stuck client.
+// Engine ring capacity server-tests runs with (power of two) -- small, since
+// the test plays the engine and drains them itself.
 #define RINGBUF_SIZE 512
 
+// Latency sampling for server/include/latency.hpp (not yet wired into the
+// DPDK gateway): cold-start samples dropped, then samples collected.
 #define LATENCY_SAMPLE_DROP 5
 #define LATENCY_SAMPLE_COUNT (2000 + LATENCY_SAMPLE_DROP)
-                                                              // get the desired number of samples
+
 #endif //UNTITLED_MACROS_H

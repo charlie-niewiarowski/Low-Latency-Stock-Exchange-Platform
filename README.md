@@ -125,8 +125,8 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | `PREALLOCATION_COUNT` | `1000000` | `OrderPool` arena capacity / `OrderMap` reserve |
 | `RINGBUF_SIZE` | `512` | Engine ring capacity used by `server-tests` |
 
-`LOGGING`, `PORT`, `PIPELINE_DEPTH`, `LATENCY_SAMPLE_DROP` and `LATENCY_SAMPLE_COUNT`
-are still defined but no longer used by the exchange.
+`LATENCY_SAMPLE_DROP`/`LATENCY_SAMPLE_COUNT` configure `server/include/latency.hpp`,
+which isn't wired into the DPDK gateway yet.
 
 ### Client: `src/client/config/config.hpp`
 
@@ -166,6 +166,3 @@ bind the same port), are serialized with resource locks, so `ctest -j` is safe.
 | `packet-factory-tests` | Ethernet/IPv4/TCP/UDP packet building and parsing | software-only EAL |
 | `server-tests` | The real `Server` end to end over a `net_ring0` vdev, with the test playing both the SoupBinTCP client and the engine | software-only EAL |
 | `client-tests` | The real `LoadGenerator` against an in-test SoupBinTCP/OUCH exchange on loopback | `EXCHANGE_PORT` free |
-
-Two transport-header round-trip tests in `packet-factory-tests` are still marked
-`DISABLED_`; they pass if enabled.

@@ -239,16 +239,11 @@ TEST_F(PacketFactoryTest, RejectsMismatchedIpProtocol) {
 }
 
 //=============================================================================
-// Known-broken transport header round-trip (not fixed here -- see
-// deserialize_tcp/deserialize_udp in network_proto.hpp). DISABLED so the suite
-// stays green; these record the *correct* expected behavior, so fixing
-// deserialize_tcp/deserialize_udp to actually parse rte_tcp_hdr/rte_udp_hdr
-// (instead of memcpy'ing wire bytes straight into TCPHeader/UDPHeader's own,
-// differently-laid-out, host-order struct) should make them pass unmodified
-// once the DISABLED_ prefix is dropped.
+// Transport headers: deserialize_tcp/deserialize_udp read the real
+// rte_tcp_hdr/rte_udp_hdr wire layouts back into the host-order structs.
 //=============================================================================
 
-TEST_F(PacketFactoryTest, DISABLED_TcpTransportHeaderRoundtrips) {
+TEST_F(PacketFactoryTest, TcpTransportHeaderRoundtrips) {
     const PacketEndpoint client = MakeEndpoint({0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01}, 0xC0A80101);
     const PacketEndpoint server = MakeEndpoint({0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03}, 0x0A000005);
 
@@ -275,7 +270,7 @@ TEST_F(PacketFactoryTest, DISABLED_TcpTransportHeaderRoundtrips) {
     EXPECT_EQ(result.transport.window, tcp.window);
 }
 
-TEST_F(PacketFactoryTest, DISABLED_UdpTransportHeaderRoundtrips) {
+TEST_F(PacketFactoryTest, UdpTransportHeaderRoundtrips) {
     const PacketEndpoint client = MakeEndpoint({0x11, 0x22, 0x33, 0x44, 0x55, 0x66}, 0xC0A80164);
     const PacketEndpoint server = MakeEndpoint({0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC}, 0xE0000001);
 

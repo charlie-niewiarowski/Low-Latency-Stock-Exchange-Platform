@@ -5,10 +5,11 @@
 #ifndef NETWORK_PROTO_H
 #define NETWORK_PROTO_H
 
+#include "wire_codec.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <span>
 
 //=============================================================================
@@ -19,9 +20,9 @@
 // (real rte_ether_hdr/rte_ipv4_hdr layouts, network byte order, no VLAN tag,
 // no IPv4 options -- see ethernet_header.h/ipv4_header.h in dpdk_lib).
 // deserialize_ethernet/deserialize_ipv4 read those exact wire layouts back
-// out and do the network-to-host conversion by hand (byte-at-a-time, not a
-// type-punned read) since the source bytes aren't guaranteed to be aligned
-// for the wider integer types. Serialization has no equivalent here: it
+// out through wire::WireReader, which does the network-to-host conversion
+// with memcpy-based loads (the source bytes aren't guaranteed to be aligned
+// for the wider integer types). Serialization has no equivalent here: it
 // needs the finished packet's length for total_length/checksum, which
 // doesn't fit the "struct in, span out" shape below, so it stays exactly
 // where it already correctly lives -- dpdk::build_ethernet_header/
@@ -41,10 +42,10 @@ inline EthernetHeader deserialize_ethernet(std::span<const std::byte> bytes) noe
     EthernetHeader header;
     if (bytes.size() < kEthernetHeaderLen) return header;
 
-    const auto *raw = reinterpret_cast<const uint8_t *>(bytes.data());
-    std::memcpy(header.dst_mac.data(), raw, header.dst_mac.size());
-    std::memcpy(header.src_mac.data(), raw + 6, header.src_mac.size());
-    header.ether_type = static_cast<uint16_t>((raw[12] << 8) | raw[13]);
+    wire::WireReader reader{bytes};
+    reader(header.dst_mac);
+    reader(header.src_mac);
+    reader(header.ether_type);
     return header;
 }
 
@@ -66,15 +67,16 @@ inline IPv4Header deserialize_ipv4(std::span<const std::byte> bytes) noexcept {
     IPv4Header header;
     if (bytes.size() < kIPv4HeaderLen) return header;
 
-    const auto *raw = reinterpret_cast<const uint8_t *>(bytes.data());
-    header.version_ihl  = raw[0];
-    header.ttl          = raw[8];
-    header.protocol     = raw[9];
-    header.total_length = static_cast<uint16_t>((raw[2] << 8) | raw[3]);
-    header.src_ip = (static_cast<uint32_t>(raw[12]) << 24) | (static_cast<uint32_t>(raw[13]) << 16) |
-                    (static_cast<uint32_t>(raw[14]) << 8)  |  static_cast<uint32_t>(raw[15]);
-    header.dst_ip = (static_cast<uint32_t>(raw[16]) << 24) | (static_cast<uint32_t>(raw[17]) << 16) |
-                    (static_cast<uint32_t>(raw[18]) << 8)  |  static_cast<uint32_t>(raw[19]);
+    wire::WireReader reader{bytes};
+    reader(header.version_ihl);
+    reader.take(1);                 // type of service
+    reader(header.total_length);
+    reader.take(4);                 // identification, flags + fragment offset
+    reader(header.ttl);
+    reader(header.protocol);
+    reader.take(2);                 // header checksum
+    reader(header.src_ip);
+    reader(header.dst_ip);
     return header;
 }
 
@@ -99,8 +101,8 @@ struct TCPHeader {
 // sent_seq(4), recv_ack(4), data_off(1), tcp_flags(1), rx_win(2), cksum(2),
 // tcp_urp(2); 20 bytes, packed -- not TCPHeader's own layout, so this reads
 // those exact wire offsets and converts each multi-byte field back to host
-// order by hand (not a type-punned read -- see deserialize_ethernet/
-// deserialize_ipv4 for why). data_off is always 5 (20-byte header, no
+// order through wire::WireReader (see deserialize_ethernet/deserialize_ipv4).
+// data_off is always 5 (20-byte header, no
 // options; see build_tcp_header) and isn't surfaced on TCPHeader; cksum/
 // tcp_urp aren't needed here either.
 inline constexpr size_t kTcpWireHeaderLen = 20;
@@ -109,15 +111,14 @@ inline TCPHeader deserialize_tcp(std::span<const std::byte> bytes) noexcept {
     TCPHeader header{};
     if (bytes.size() < kTcpWireHeaderLen) return header;
 
-    const auto *raw = reinterpret_cast<const uint8_t *>(bytes.data());
-    header.src_port = static_cast<uint16_t>((raw[0] << 8) | raw[1]);
-    header.dst_port = static_cast<uint16_t>((raw[2] << 8) | raw[3]);
-    header.seq = (static_cast<uint32_t>(raw[4]) << 24) | (static_cast<uint32_t>(raw[5]) << 16) |
-                 (static_cast<uint32_t>(raw[6]) << 8)  |  static_cast<uint32_t>(raw[7]);
-    header.ack = (static_cast<uint32_t>(raw[8]) << 24) | (static_cast<uint32_t>(raw[9]) << 16) |
-                 (static_cast<uint32_t>(raw[10]) << 8)  |  static_cast<uint32_t>(raw[11]);
-    header.flags  = raw[13];
-    header.window = static_cast<uint16_t>((raw[14] << 8) | raw[15]);
+    wire::WireReader reader{bytes};
+    reader(header.src_port);
+    reader(header.dst_port);
+    reader(header.seq);
+    reader(header.ack);
+    reader.take(1);                 // data_off
+    reader(header.flags);
+    reader(header.window);
     return header;
 }
 
@@ -129,7 +130,7 @@ struct UDPHeader {
 // What's on the wire is dpdk::build_udp_header's real rte_udp_hdr --
 // src_port(2), dst_port(2), dgram_len(2), dgram_cksum(2); 8 bytes, packed,
 // network byte order. Same treatment as deserialize_tcp above: read the
-// real wire offsets, convert src_port/dst_port back to host order by hand;
+// real wire offsets, convert src_port/dst_port back to host order via WireReader;
 // dgram_len/dgram_cksum aren't needed here.
 inline constexpr size_t kUdpWireHeaderLen = 8;
 
@@ -137,9 +138,9 @@ inline UDPHeader deserialize_udp(std::span<const std::byte> bytes) noexcept {
     UDPHeader header{};
     if (bytes.size() < kUdpWireHeaderLen) return header;
 
-    const auto *raw = reinterpret_cast<const uint8_t *>(bytes.data());
-    header.src_port = static_cast<uint16_t>((raw[0] << 8) | raw[1]);
-    header.dst_port = static_cast<uint16_t>((raw[2] << 8) | raw[3]);
+    wire::WireReader reader{bytes};
+    reader(header.src_port);
+    reader(header.dst_port);
     return header;
 }
 
