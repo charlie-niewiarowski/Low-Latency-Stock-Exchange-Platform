@@ -27,6 +27,13 @@ constexpr uint16_t kTxQueues = 1;
 // Max responses staged before handing them to the NIC in one burst.
 constexpr size_t kTxBurst = 32;
 
+// Room for any one SoupBinTCP packet the server sends: the largest is a
+// Sequenced Data packet around an Order Accepted carrying every appendage.
+constexpr size_t kMaxSoupPacket = 256;
+
+// How often outbound_ checks whether any session is due a heartbeat.
+constexpr uint64_t kHeartbeatScanNs = 100'000'000;
+
 // Production wants the real EAL defaults: probe the PCI bus, bind whatever
 // NIC is bound to a DPDK PMD, use hugepages. Tests can't assume any of
 // that -- no hugepage permissions, no NIC bound away from the kernel -- so
@@ -132,7 +139,7 @@ ClientId Server::resolve_client_id_(const PacketEndpoint &src, const PacketEndpo
 }
 
 //=============================================================================
-// inbound: DPDK rx -> OrderEntry -> notes_ / engine
+// inbound: DPDK rx -> SoupBinTCP -> OrderEntry -> notes_ / engine
 //=============================================================================
 
 void Server::inbound_() {
@@ -144,55 +151,111 @@ void Server::inbound_() {
             continue;
         }
 
-        const Timestamp recv_tsc = __rdtsc();
+        const InboundStamps stamps{.read_begin_tsc = read_begin_tsc, .recv_tsc = __rdtsc()};
 
         for (const dpdk::packet &packet : burst) {
-            const auto deserialized =
-                packet_factory<TCPHeader, OuchInboundFrame>::deserialize_packet(packet);
+            const auto deserialized = packet_factory<TCPHeader, RawPayload>::deserialize_packet(packet);
 
-            // deserialize_packet zeroes src.ip (and leaves message_type at
-            // its NONE default) on any parse failure -- too short, not
-            // IPv4, IPv4 options present, or the IP protocol didn't match
-            // TCP. Nothing downstream can trust an unparsed packet.
-            if (deserialized.src.ip == 0 ||
-                deserialized.payload.message_type == InboundOuchMessageType::NONE) {
+            // deserialize_packet zeroes src.ip on any parse failure -- too
+            // short, not IPv4, IPv4 options present, or the IP protocol
+            // didn't match TCP. Nothing downstream can trust an unparsed
+            // packet. Payload-less segments (a bare ACK) carry nothing either.
+            if (deserialized.src.ip == 0 || deserialized.payload.bytes.empty()) {
                 continue;
             }
 
-            // Session stub: one TCP segment carries exactly one OUCH
-            // message and the session is the sender's (ip, port). Everything
-            // from here on only sees (ClientId, message), so a real
-            // SoupBinTCP layer can replace this without touching it.
             const ClientId client_id =
                 resolve_client_id_(deserialized.src, deserialized.dst, deserialized.transport);
             if (client_id == 0) {
                 continue; // session table full
             }
 
-            Translation translation = order_entry_.translate(client_id, deserialized.payload);
-
-            // Note before request: the outbound thread must already have an
-            // order's record when the engine's event for it arrives.
-            if (translation.note) {
-                while (!notes_.push(*translation.note) && !shutdown_.load()) {
-                    // ring full; spin until there's room or we're shutting down
-                }
-            }
-            if (translation.request) {
-                EngineRequest &request = *translation.request;
-                request.read_begin_tsc  = read_begin_tsc;
-                request.recv_tsc        = recv_tsc;
-                request.server_push_tsc = __rdtsc();
-                while (!inbound_ring_->push(request) && !shutdown_.load()) {
-                    // ring full; spin until there's room or we're shutting down
-                }
+            // Stub: the segment holds whole SoupBinTCP packets. Without TCP
+            // reassembly a packet split across segments can't be recovered,
+            // so whatever doesn't parse as complete is dropped.
+            std::span<const std::byte> stream = deserialized.payload.bytes;
+            while (!stream.empty()) {
+                const SoupParseResult parsed = parse_soup_packet(stream);
+                if (parsed.status != SoupParseStatus::PACKET) break;
+                handle_soup_packet_(client_id, parsed.packet, stamps);
+                stream = stream.subspan(parsed.consumed);
             }
         }
     }
 }
 
+void Server::handle_soup_packet_(const ClientId client_id, const SoupPacket &packet, const InboundStamps &stamps) {
+    InboundSession &session = inbound_sessions_[client_id];
+    const auto session_note = [&](const GatewayNote::Kind kind, const uint16_t reason = 0) {
+        GatewayNote note{.kind = kind, .reject_reason = reason, .order_id = 0, .record = {}};
+        note.record.client_id = client_id;
+        push_note_(note);
+    };
+
+    switch (packet.type) {
+        case SoupPacketType::LOGIN_REQUEST: {
+            const std::optional<SoupLoginRequest> login = decode_soup_login_request(packet.payload);
+            if (!login || session.logged_in) return;
+            // Blank means "the current session". The spec only says how Login
+            // Accepted pads a session id, so accept the name padded either way.
+            const SoupSessionId &requested = login->requested_session;
+            if (requested != wire::alpha<10>("") && requested != soup_session_id(SOUP_SESSION) &&
+                requested != wire::alpha<10>(SOUP_SESSION)) {
+                session_note(GatewayNote::Kind::LOGIN_REJECTED, soup_reject::kSessionNotAvailable);
+                return;
+            }
+            session.logged_in = true;
+            session_note(GatewayNote::Kind::LOGIN_ACCEPTED);
+            return;
+        }
+
+        case SoupPacketType::UNSEQUENCED_DATA:
+            // Only allowed after Login Accepted.
+            if (session.logged_in) handle_ouch_(client_id, decode_inbound_ouch(packet.payload), stamps);
+            return;
+
+        case SoupPacketType::LOGOUT_REQUEST:
+            if (!session.logged_in) return;
+            session.logged_in = false;
+            session_note(GatewayNote::Kind::LOGGED_OUT);
+            return;
+
+        default:
+            return; // client heartbeats, debug, and anything else a client shouldn't send
+    }
+}
+
+void Server::handle_ouch_(const ClientId client_id, const OuchInboundFrame &msg, const InboundStamps &stamps) {
+    if (msg.message_type == InboundOuchMessageType::NONE) {
+        return; // malformed or not an inbound OUCH message
+    }
+
+    Translation translation = order_entry_.translate(client_id, msg);
+
+    // Note before request: the outbound thread must already have an order's
+    // record when the engine's event for it arrives.
+    if (translation.note) {
+        push_note_(*translation.note);
+    }
+    if (translation.request) {
+        EngineRequest &request = *translation.request;
+        request.read_begin_tsc  = stamps.read_begin_tsc;
+        request.recv_tsc        = stamps.recv_tsc;
+        request.server_push_tsc = __rdtsc();
+        while (!inbound_ring_->push(request) && !shutdown_.load()) {
+            // ring full; spin until there's room or we're shutting down
+        }
+    }
+}
+
+void Server::push_note_(const GatewayNote &note) {
+    while (!notes_.push(note) && !shutdown_.load()) {
+        // ring full; spin until there's room or we're shutting down
+    }
+}
+
 //=============================================================================
-// outbound: notes_ / engine -> OuchResponder -> DPDK tx
+// outbound: notes_ / engine -> OuchResponder -> SoupBinTCP -> DPDK tx
 //=============================================================================
 
 void Server::outbound_() {
@@ -215,38 +278,90 @@ void Server::outbound_() {
         staged = 0;
     };
 
-    const auto stage = [&](const OuchResponse &response) {
-        const ClientEndpoint &endpoint = endpoints_[response.client_id];
+    // One SoupBinTCP packet to one client, in its own TCP segment.
+    const auto send = [&](const ClientId client_id, const std::span<const std::byte> soup) {
+        const ClientEndpoint &endpoint = endpoints_[client_id];
         const TCPHeader tcp{.src_port = endpoint.local_port, .dst_port = endpoint.remote_port,
                             .flags = RTE_TCP_PSH_FLAG | RTE_TCP_ACK_FLAG};
         const auto build = [&] {
-            return packet_factory<TCPHeader, OuchOutboundFrame>::build_packet(
-                *pool, endpoint.local, endpoint.remote, tcp, response.ouch);
+            return packet_factory<TCPHeader, RawPayload>::build_packet(
+                *pool, endpoint.local, endpoint.remote, tcp, RawPayload{soup});
         };
 
         dpdk::packet packet = build();
         // An empty pool means mbufs are still out with the NIC: hand it what's
-        // staged (freeing those once sent) and try again rather than drop an ack.
+        // staged (freeing those once sent) and try again rather than drop.
         while (!packet && !shutdown_.load()) {
             flush();
             packet = build();
         }
         if (!packet) return;
 
+        outbound_sessions_[client_id].last_sent_tsc = __rdtsc();
         burst[staged++] = std::move(packet);
         if (staged == burst.size()) flush();
     };
 
+    std::array<std::byte, kMaxSoupPacket> scratch{};
+
+    const auto send_ouch = [&](const OuchResponse &response) {
+        OutboundSession &session = outbound_sessions_[response.client_id];
+        if (!session.logged_in) return; // no session to deliver into (no replay yet)
+        const size_t len = encode_soup_sequenced(response.ouch, scratch);
+        if (len == 0) return;
+        ++session.next_sequence_number;
+        send(response.client_id, std::span{scratch}.first(len));
+    };
+
+    const auto handle_note = [&](const GatewayNote &note) {
+        const ClientId client_id = note.record.client_id;
+        OutboundSession &session = outbound_sessions_[client_id];
+        switch (note.kind) {
+            case GatewayNote::Kind::LOGIN_ACCEPTED: {
+                session.logged_in = true;
+                const SoupLoginAccepted accepted{.session = soup_session_id(SOUP_SESSION),
+                                                 .sequence_number = session.next_sequence_number};
+                send(client_id, std::span{scratch}.first(encode_soup_login_accepted(accepted, scratch)));
+                return;
+            }
+            case GatewayNote::Kind::LOGIN_REJECTED:
+                send(client_id, std::span{scratch}.first(
+                    encode_soup_login_rejected(static_cast<char>(note.reject_reason), scratch)));
+                return;
+            case GatewayNote::Kind::LOGGED_OUT:
+                session.logged_in = false;
+                return;
+            default:
+                if (const auto response = responder_.on_note(note, clock.ns_since_midnight())) {
+                    send_ouch(*response);
+                }
+                return;
+        }
+    };
+
     const auto drain_notes = [&] {
-        while (const auto note = notes_.pop()) {
-            if (const auto response = responder_.on_note(*note, clock.ns_since_midnight())) {
-                stage(*response);
+        while (const auto note = notes_.pop()) handle_note(*note);
+    };
+
+    // SoupBinTCP: a Server Heartbeat to any logged-in client that's heard
+    // nothing for over a second. Scanned at most every kHeartbeatScanNs.
+    Timestamp last_scan_tsc = __rdtsc();
+    const auto heartbeat = [&] {
+        const Timestamp now = __rdtsc();
+        if (clock.ticks_to_ns(now - last_scan_tsc) < kHeartbeatScanNs) return;
+        last_scan_tsc = now;
+
+        const size_t len = encode_soup_empty(SoupPacketType::SERVER_HEARTBEAT, scratch);
+        for (ClientId client_id = 1; client_id <= MAX_CLIENTS; ++client_id) {
+            const OutboundSession &session = outbound_sessions_[client_id];
+            if (session.logged_in && clock.ticks_to_ns(now - session.last_sent_tsc) > kSoupHeartbeatIntervalNs) {
+                send(client_id, std::span{scratch}.first(len));
             }
         }
     };
 
     while (!shutdown_.load()) {
-        drain_notes(); // also how gateway rejects go out with no engine event behind them
+        drain_notes(); // also how gateway rejects and logins go out with no engine event behind them
 
         while (const auto event = outbound_ring_->pop()) {
             // The note for this event's order may have landed after the
@@ -254,10 +369,11 @@ void Server::outbound_() {
             // there by now).
             drain_notes();
             if (const auto response = responder_.on_event(*event, clock.ns_since_midnight(event->engine_push_tsc))) {
-                stage(*response);
+                send_ouch(*response);
             }
         }
 
+        heartbeat();
         if (staged > 0) flush();
     }
 }

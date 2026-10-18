@@ -41,6 +41,10 @@
 #define PREALLOCATION_COUNT 1'000'000
 
 #define PORT "4000"
+
+// SoupBinTCP session clients log into. Any username/password is accepted
+// for now; a Login Request naming another session is rejected.
+#define SOUP_SESSION "SIM"
 #define MAX_CLIENTS 64
 
 #define PIPELINE_DEPTH 32

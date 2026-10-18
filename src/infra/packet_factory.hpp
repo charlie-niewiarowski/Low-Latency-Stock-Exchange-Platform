@@ -38,10 +38,21 @@ inline rte_ether_addr to_rte_ether_addr(const MacAddress &mac) noexcept {
 }
 
 
+// An undecoded TCP payload: a slice of a byte stream (e.g. SoupBinTCP),
+// whose logical messages needn't line up with segments. On the deserialize
+// side, bytes points into the packet it came from and is only valid while
+// that packet is.
+struct RawPayload {
+    std::span<const std::byte> bytes;
+};
+
+inline size_t encoded_size(const RawPayload &payload) noexcept { return payload.bytes.size(); }
+
 template <typename transport_type, typename payload_type>
 concept ValidPacketCombo =
     (std::is_same_v<transport_type, TCPHeader> &&
-        (std::is_same_v<payload_type, OuchInboundFrame> || std::is_same_v<payload_type, OuchOutboundFrame>)) ||
+        (std::is_same_v<payload_type, OuchInboundFrame> || std::is_same_v<payload_type, OuchOutboundFrame> ||
+         std::is_same_v<payload_type, RawPayload>)) ||
     (std::is_same_v<transport_type, UDPHeader> && std::is_same_v<payload_type, ITCH>);
 
 
@@ -142,7 +153,10 @@ bool packet_factory<transport_type, payload_type>::append_payload(
     if (dst == nullptr) return false;
 
     const std::span<std::byte> out{dst, len};
-    if constexpr (std::is_same_v<payload_type, OuchInboundFrame>) {
+    if constexpr (std::is_same_v<payload_type, RawPayload>) {
+        std::memcpy(out.data(), payload.bytes.data(), len);
+        return true;
+    } else if constexpr (std::is_same_v<payload_type, OuchInboundFrame>) {
         return encode_inbound_ouch(payload, out) == len;
     } else if constexpr (std::is_same_v<payload_type, OuchOutboundFrame>) {
         return encode_outbound_ouch(payload, out) == len;
@@ -215,7 +229,9 @@ packet_factory<transport_type, payload_type>::deserialize_packet(const dpdk::pac
     } else {
         result.transport = deserialize_udp(transport_span);
     }
-    if constexpr (std::is_same_v<payload_type, OuchInboundFrame>) {
+    if constexpr (std::is_same_v<payload_type, RawPayload>) {
+        result.payload = RawPayload{payload_span};
+    } else if constexpr (std::is_same_v<payload_type, OuchInboundFrame>) {
         result.payload = decode_inbound_ouch(payload_span);
     } else if constexpr (std::is_same_v<payload_type, OuchOutboundFrame>) {
         result.payload = decode_outbound_ouch(payload_span);

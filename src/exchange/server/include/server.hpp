@@ -8,6 +8,7 @@
 #include "config.hpp"
 #include "order_entry.hpp"
 #include "ouch_responder.hpp"
+#include "soupbintcp_proto.hpp"
 
 #include <runtime.h>
 #include <packet_factory.hpp>
@@ -19,16 +20,21 @@
 #include <memory>
 #include <thread>
 
-// TODO soupbintcp
-
 /*
 The server's mental model:
 
-    DPDK rx queue -> decode OUCH -> OrderEntry (validate, translate) -> engine inbound ring
+    DPDK rx queue -> SoupBinTCP -> decode OUCH -> OrderEntry (validate, translate) -> engine inbound ring
                                          |
                                          +-> notes_ (records, gateway rejects)
                                                  |
-    DPDK tx queue <- encode OUCH <- OuchResponder <- engine outbound ring
+    DPDK tx queue <- SoupBinTCP <- encode OUCH <- OuchResponder <- engine outbound ring
+
+The SoupBinTCP layer is a stub until the DPDK lib terminates TCP: each TCP
+segment is taken to hold whole SoupBinTCP packets (any number of them, but
+none split across segments), a session is the sender's (ip, port), there
+is no retransmission or re-login replay, and client heartbeat timeouts
+aren't enforced. Login, logout, Sequenced/Unsequenced Data and server
+heartbeats are real.
 
 Two threads, each owning one half: inbound_ owns OrderEntry and the
 session table, outbound_ owns OuchResponder and the tx queue. The only
@@ -105,6 +111,26 @@ private:
 
     // 0 if this is a new endpoint and MAX_CLIENTS are already taken.
     ClientId resolve_client_id_(const PacketEndpoint &src, const PacketEndpoint &dst, const TCPHeader &tcp);
+
+    // SoupBinTCP session state, split by which thread owns it.
+    struct InboundSession {
+        bool logged_in = false;
+    };
+    struct OutboundSession {
+        bool      logged_in = false;
+        uint64_t  next_sequence_number = 1; // of the next Sequenced Data packet
+        Timestamp last_sent_tsc = 0;        // for server heartbeats
+    };
+    std::array<InboundSession, MAX_CLIENTS + 1> inbound_sessions_{};   // inbound-thread only
+    std::array<OutboundSession, MAX_CLIENTS + 1> outbound_sessions_{}; // outbound-thread only
+
+    struct InboundStamps {
+        Timestamp read_begin_tsc;
+        Timestamp recv_tsc;
+    };
+    void handle_soup_packet_(ClientId client_id, const SoupPacket &packet, const InboundStamps &stamps);
+    void handle_ouch_(ClientId client_id, const OuchInboundFrame &msg, const InboundStamps &stamps);
+    void push_note_(const GatewayNote &note);
 
     std::atomic<bool> shutdown_{false};
     std::jthread inbound_thread_;

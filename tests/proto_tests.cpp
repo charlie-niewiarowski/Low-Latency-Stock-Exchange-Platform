@@ -8,6 +8,7 @@
 
 #include "ouch_proto.hpp"
 #include "itch_proto.hpp"
+#include "soupbintcp_proto.hpp"
 
 #include <array>
 #include <cstddef>
@@ -656,4 +657,153 @@ TEST(Itch, RejectsWrongLengthAndUnknownType) {
 
     EXPECT_EQ(decode_itch({}).header.message_type, ItchMessageType::NONE);
     EXPECT_EQ(encoded_size(ITCH{}), 0u);
+}
+
+//=============================================================================
+// SoupBinTCP
+//=============================================================================
+
+namespace {
+
+template <typename F>
+Bytes EncodeSoup(F &&encode, const size_t capacity = 256) {
+    Bytes out(capacity);
+    out.resize(encode(std::span<std::byte>{out}));
+    return out;
+}
+
+std::string Ascii(const Bytes &b, const size_t offset, const size_t len) {
+    std::string out;
+    for (size_t i = 0; i < len; ++i) out.push_back(At(b, offset + i));
+    return out;
+}
+
+} // namespace
+
+TEST(Soup, LoginRequestLayoutMatchesSpec) {
+    const SoupLoginRequest login{.username = wire::alpha<6>("trader"), .password = wire::alpha<10>("secret"),
+                                 .requested_session = wire::alpha<10>(""), .requested_sequence_number = 1};
+    const Bytes b = EncodeSoup([&](auto out) { return encode_soup_login_request(login, out); });
+
+    ASSERT_EQ(b.size(), 49u);
+    EXPECT_EQ(BE(b, 0, 2), 47u); // type + 46-byte payload
+    EXPECT_EQ(At(b, 2), 'L');
+    EXPECT_EQ(Ascii(b, 3, 6), "trader");
+    EXPECT_EQ(Ascii(b, 9, 10), "secret    ");
+    EXPECT_EQ(Ascii(b, 19, 10), "          ");
+    EXPECT_EQ(Ascii(b, 29, 20), "                   1");
+
+    const SoupParseResult parsed = parse_soup_packet(b);
+    ASSERT_EQ(parsed.status, SoupParseStatus::PACKET);
+    EXPECT_EQ(parsed.consumed, b.size());
+    EXPECT_EQ(parsed.packet.type, SoupPacketType::LOGIN_REQUEST);
+    const auto decoded = decode_soup_login_request(parsed.packet.payload);
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->username, login.username);
+    EXPECT_EQ(decoded->password, login.password);
+    EXPECT_EQ(decoded->requested_sequence_number, 1u);
+}
+
+TEST(Soup, LoginAcceptedRightJustifiesSessionAndSequence) {
+    const SoupLoginAccepted accepted{.session = soup_session_id("SIM"), .sequence_number = 1234};
+    const Bytes b = EncodeSoup([&](auto out) { return encode_soup_login_accepted(accepted, out); });
+
+    ASSERT_EQ(b.size(), 33u);
+    EXPECT_EQ(BE(b, 0, 2), 31u);
+    EXPECT_EQ(At(b, 2), 'A');
+    EXPECT_EQ(Ascii(b, 3, 10), "       SIM");
+    EXPECT_EQ(Ascii(b, 13, 20), "                1234");
+
+    const auto decoded = decode_soup_login_accepted(parse_soup_packet(b).packet.payload);
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->session, soup_session_id("SIM"));
+    EXPECT_EQ(decoded->sequence_number, 1234u);
+}
+
+TEST(Soup, NumericFieldsMustBeSpacePaddedDigits) {
+    const SoupLoginAccepted accepted{.session = soup_session_id("SIM"), .sequence_number = 0};
+    Bytes b = EncodeSoup([&](auto out) { return encode_soup_login_accepted(accepted, out); });
+    EXPECT_EQ(Ascii(b, 13, 20), "                   0");
+
+    Bytes letters = b;
+    letters[30] = std::byte{'x'};
+    EXPECT_FALSE(decode_soup_login_accepted(parse_soup_packet(letters).packet.payload));
+
+    Bytes blank = b;
+    blank[32] = std::byte{' '};
+    EXPECT_FALSE(decode_soup_login_accepted(parse_soup_packet(blank).packet.payload));
+
+    Bytes split = b; // "...1 0": digits broken up by a space
+    split[30] = std::byte{'1'};
+    split[31] = std::byte{' '};
+    split[32] = std::byte{'0'};
+    EXPECT_FALSE(decode_soup_login_accepted(parse_soup_packet(split).packet.payload));
+}
+
+TEST(Soup, DataPacketsWrapExactlyOneOuchMessage) {
+    OuchInboundFrame cancel{};
+    cancel.cancel_order = OuchCancelOrder{};
+    cancel.cancel_order.user_ref_num = 5;
+    cancel.cancel_order.quantity = 0;
+    const Bytes u = EncodeSoup([&](auto out) { return encode_soup_unsequenced(cancel, out); });
+
+    ASSERT_EQ(u.size(), 3u + 11);
+    EXPECT_EQ(BE(u, 0, 2), 12u);
+    EXPECT_EQ(At(u, 2), 'U');
+    const SoupParseResult parsed = parse_soup_packet(u);
+    ASSERT_EQ(parsed.status, SoupParseStatus::PACKET);
+    const OuchInboundFrame decoded = decode_inbound_ouch(parsed.packet.payload);
+    ASSERT_EQ(decoded.message_type, InboundOuchMessageType::CANCEL_ORDER);
+    EXPECT_EQ(decoded.cancel_order.user_ref_num, 5u);
+
+    OuchOutboundFrame canceled{};
+    canceled.order_canceled = OuchOrderCanceled{};
+    canceled.order_canceled.reason = 'U';
+    const Bytes s = EncodeSoup([&](auto out) { return encode_soup_sequenced(canceled, out); });
+    ASSERT_EQ(s.size(), 3u + 20);
+    EXPECT_EQ(At(s, 2), 'S');
+    EXPECT_EQ(decode_outbound_ouch(parse_soup_packet(s).packet.payload).message_type,
+              OutboundOuchMessageType::ORDER_CANCELED);
+}
+
+TEST(Soup, HeartbeatIsHeaderOnly) {
+    const Bytes b = EncodeSoup([](auto out) { return encode_soup_empty(SoupPacketType::SERVER_HEARTBEAT, out); });
+    ASSERT_EQ(b.size(), 3u);
+    EXPECT_EQ(BE(b, 0, 2), 1u);
+    EXPECT_EQ(At(b, 2), 'H');
+    const SoupParseResult parsed = parse_soup_packet(b);
+    ASSERT_EQ(parsed.status, SoupParseStatus::PACKET);
+    EXPECT_TRUE(parsed.packet.payload.empty());
+}
+
+TEST(Soup, ParsesAStreamPacketByPacket) {
+    Bytes stream = EncodeSoup([](auto out) { return encode_soup_empty(SoupPacketType::CLIENT_HEARTBEAT, out); });
+    const Bytes rejected = EncodeSoup([](auto out) { return encode_soup_login_rejected(soup_reject::kNotAuthorized, out); });
+    stream.insert(stream.end(), rejected.begin(), rejected.end());
+
+    // Nothing, then a lone length byte, then a header short of its payload.
+    EXPECT_EQ(parse_soup_packet({}).status, SoupParseStatus::INCOMPLETE);
+    EXPECT_EQ(parse_soup_packet(std::span{stream}.first(1)).status, SoupParseStatus::INCOMPLETE);
+    EXPECT_EQ(parse_soup_packet(std::span{stream}.subspan(3, 3)).status, SoupParseStatus::INCOMPLETE);
+
+    const SoupParseResult first = parse_soup_packet(stream);
+    ASSERT_EQ(first.status, SoupParseStatus::PACKET);
+    EXPECT_EQ(first.packet.type, SoupPacketType::CLIENT_HEARTBEAT);
+
+    const SoupParseResult second = parse_soup_packet(std::span{stream}.subspan(first.consumed));
+    ASSERT_EQ(second.status, SoupParseStatus::PACKET);
+    EXPECT_EQ(second.packet.type, SoupPacketType::LOGIN_REJECTED);
+    ASSERT_EQ(second.packet.payload.size(), 1u);
+    EXPECT_EQ(static_cast<char>(second.packet.payload[0]), 'A');
+    EXPECT_EQ(first.consumed + second.consumed, stream.size());
+
+    const Bytes zero_length{std::byte{0}, std::byte{0}, std::byte{'H'}};
+    EXPECT_EQ(parse_soup_packet(zero_length).status, SoupParseStatus::MALFORMED);
+}
+
+TEST(Soup, EncodersRefuseShortBuffers) {
+    std::array<std::byte, 10> small{};
+    const SoupLoginAccepted accepted{.session = soup_session_id("SIM"), .sequence_number = 1};
+    EXPECT_EQ(encode_soup_login_accepted(accepted, small), 0u);
+    EXPECT_EQ(encode_soup_empty(SoupPacketType::SERVER_HEARTBEAT, std::span{small}.first(2)), 0u);
 }
