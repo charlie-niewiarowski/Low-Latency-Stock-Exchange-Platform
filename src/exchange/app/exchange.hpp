@@ -15,8 +15,13 @@ public:
     void run();
     static void stop(int sig);
 private:
-    InboundRing in_ring_{COMMUNICATION_RING_COUNT};
-    OutboundRing out_ring_{COMMUNICATION_RING_COUNT};
+    // Declared (so constructed) before, and destroyed after, the threads
+    // that use them. Server shares ownership of its two.
+    std::shared_ptr<InboundRing> in_ring_ = std::make_shared<InboundRing>(COMMUNICATION_RING_COUNT);
+    std::shared_ptr<OutboundRing> out_ring_ = std::make_shared<OutboundRing>(COMMUNICATION_RING_COUNT);
+    // Engine -> market data. Nothing reads it until the dissemination
+    // component exists; the engine drops on full (see MarketDataRing).
+    MarketDataRing market_data_ring_{COMMUNICATION_RING_COUNT};
 
     Engine engine_;
     Server server_;

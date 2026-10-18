@@ -51,6 +51,7 @@ set(SERVER_TEST_SOURCES
         server_test.cpp
         ${EXCHANGE_SRC}/server/src/server.cpp
         ${EXCHANGE_SRC}/server/src/order_entry.cpp
+        ${EXCHANGE_SRC}/server/src/ouch_responder.cpp
 )
 set(SERVER_TEST_INCLUDES
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -80,17 +81,20 @@ add_executable(clock-tests clock_tests.cpp)
 target_link_libraries(clock-tests PRIVATE infra GTest::gtest_main)
 gtest_discover_tests(clock-tests)
 
-# ── order entry ──────────────────────────────────────────────────────────────
-# OrderEntry (OUCH -> engine translation) and validation.hpp have no DPDK
-# dependency, so they're tested without bringing up an EAL.
+# ── gateway ──────────────────────────────────────────────────────────────────
+# The server's protocol halves -- OrderEntry (OUCH -> engine), OuchResponder
+# (engine -> OUCH) and validation.hpp -- have no DPDK dependency, so they're
+# tested without bringing up an EAL.
 
-add_executable(order-entry-tests
+add_executable(gateway-tests
         order_entry_tests.cpp
+        ouch_responder_tests.cpp
         ${EXCHANGE_SRC}/server/src/order_entry.cpp
+        ${EXCHANGE_SRC}/server/src/ouch_responder.cpp
 )
-target_include_directories(order-entry-tests PRIVATE ${EXCHANGE_SRC}/server/include)
-target_link_libraries(order-entry-tests PRIVATE infra absl::flat_hash_map GTest::gtest_main)
-gtest_discover_tests(order-entry-tests)
+target_include_directories(gateway-tests PRIVATE ${EXCHANGE_SRC}/server/include)
+target_link_libraries(gateway-tests PRIVATE infra absl::flat_hash_map GTest::gtest_main)
+gtest_discover_tests(gateway-tests)
 
 # ── packet_factory ───────────────────────────────────────────────────────────
 # packet_factory.hpp (src/infra) talk to the DPDK runtime

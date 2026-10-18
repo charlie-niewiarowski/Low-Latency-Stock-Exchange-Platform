@@ -48,6 +48,7 @@ set(EXCHANGE_SOURCES
         engine/src/orderbook.cpp
         server/src/server.cpp
         server/src/order_entry.cpp
+        server/src/ouch_responder.cpp
 )
 
 # Release
@@ -59,8 +60,13 @@ target_compile_options(exchange-release PRIVATE
 # Debug
 add_executable(exchange-debug ${EXCHANGE_SOURCES})
 target_link_libraries(exchange-debug PRIVATE infra config hdr_histogram_static dpdk_lib absl::flat_hash_map)
+# GCC 12's UBSan null/nonnull checks make abseil's raw_hash_set fail to
+# compile (its constexpr function-pointer comparisons stop being constant
+# expressions), so those three checks are off; the rest of UBSan stays on.
 target_compile_options(exchange-debug PRIVATE
         -O3 -g3 -fno-omit-frame-pointer
-        -fsanitize=address,undefined -march=native)
+        -fsanitize=address,undefined
+        -fno-sanitize=null,nonnull-attribute,returns-nonnull-attribute
+        -march=native)
 target_link_options(exchange-debug PRIVATE
         -fsanitize=address,undefined)

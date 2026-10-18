@@ -55,14 +55,16 @@ public:
         const transport_type &transport_payload,
         const payload_type &payload_payload);
 
-    // src is learned from this same packet's own Ethernet/IPv4 headers --
-    // it's how the caller finds out where to actually send a reply.
-    // Default-constructed (src.ip == 0, transport/payload zeroed) if the
+    // src/dst are learned from this same packet's own Ethernet/IPv4
+    // headers -- they're how the caller finds out where to send a reply
+    // (to src) and what to send it from (dst, the address the sender
+    // reached). Default-constructed (src.ip == 0, transport/payload zeroed) if the
     // packet is too short, isn't IPv4, has IPv4 options, or its IP
     // protocol doesn't match transport_type -- callers must check that
     // rather than assume a parse always succeeds.
     struct DeserializedPacket {
         PacketEndpoint  src{};
+        PacketEndpoint  dst{};
         transport_type  transport{};
         payload_type    payload{};
     };
@@ -223,6 +225,8 @@ packet_factory<transport_type, payload_type>::deserialize_packet(const dpdk::pac
 
     result.src.mac = to_rte_ether_addr(eth.src_mac);
     result.src.ip  = ip.src_ip;
+    result.dst.mac = to_rte_ether_addr(eth.dst_mac);
+    result.dst.ip  = ip.dst_ip;
 
     return result;
 }

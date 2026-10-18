@@ -112,6 +112,8 @@ TEST_F(PacketFactoryTest, TcpOuchLearnsSenderEndpointAndRoundtripsPayload) {
 
     EXPECT_EQ(result.src.ip, client.ip);
     EXPECT_TRUE(MacEquals(result.src.mac, client.mac));
+    EXPECT_EQ(result.dst.ip, server.ip);
+    EXPECT_TRUE(MacEquals(result.dst.mac, server.mac));
 
     EXPECT_EQ(result.payload.message_type, InboundOuchMessageType::ENTER_ORDER);
     EXPECT_EQ(result.payload.enter_order.user_ref_num, enter.user_ref_num);

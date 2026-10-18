@@ -5,29 +5,39 @@
 #ifndef TOYEXCHANGE_ORDERGATEWAY_HPP
 #define TOYEXCHANGE_ORDERGATEWAY_HPP
 
-#include <condition_variable>
-
 #include "config.hpp"
 #include "order_entry.hpp"
+#include "ouch_responder.hpp"
 
 #include <runtime.h>
 #include <packet_factory.hpp>
 #include <ring_buffer.hpp>
 #include <absl/container/flat_hash_map.h>
+
+#include <array>
 #include <atomic>
+#include <memory>
+#include <thread>
 
 // TODO soupbintcp
 
 /*
-The server's mental model should be:
+The server's mental model:
 
-    DPDK rx queue -> deserialize packet -> validate order/req -> matching engine rx ring
-    DPDP tx queue <- serialize packet <- matching engine tx ring
+    DPDK rx queue -> decode OUCH -> OrderEntry (validate, translate) -> engine inbound ring
+                                         |
+                                         +-> notes_ (records, gateway rejects)
+                                                 |
+    DPDK tx queue <- encode OUCH <- OuchResponder <- engine outbound ring
 
-Naturally, we don't have to worry about routing because the packet factory builds IP headers for us!!
-However, internally we have to store packet information for each client ID
+Two threads, each owning one half: inbound_ owns OrderEntry and the
+session table, outbound_ owns OuchResponder and the tx queue. The only
+state they share is the rings and endpoints_, which inbound_ writes once
+per client before anything about that client reaches outbound_.
 
-naturally we could do client ID -> addressing information
+Routing is free -- packet_factory builds the Ethernet/IP headers -- so the
+only per-client addressing kept is the endpoint pair a client's first
+packet arrived on.
 */
 class Server {
     friend class ServerTest;
@@ -42,17 +52,31 @@ public:
     Server &operator=(const Server &) = delete;
     Server &operator=(Server &&) = delete;
 
-    ~Server() = default; // for now
+    ~Server();
 
+    // Starts the inbound and outbound threads and returns; stop() (or the
+    // destructor) ends and joins them.
     void run();
+    void stop();
+
 private:
+    // Where a client's packets come from and go back to: remote is the
+    // client, local is the address/port it reached.
     struct ClientEndpoint {
         PacketEndpoint remote;
-        TCPHeader tcp;
+        PacketEndpoint local;
+        uint16_t       remote_port;
+        uint16_t       local_port;
     };
 
     dpdk::runtime dpdk_runtime_;
     dpdk::port dpdk_port_;
+    std::shared_ptr<dpdk::rx_queue> rx_queue_;
+    std::shared_ptr<dpdk::tx_queue> tx_queue_;
+#if TESTING
+    // See the queue-claiming comment in the constructor.
+    std::shared_ptr<dpdk::tx_queue> test_client_tx_queue_;
+#endif
 
     std::shared_ptr<InboundRing> inbound_ring_;
     std::shared_ptr<OutboundRing> outbound_ring_;
@@ -62,20 +86,29 @@ private:
 
     // Inbound-thread only.
     OrderEntry order_entry_{validation::PriceBand{.min = MIN_PRICE, .max = MAX_PRICE}};
+    // Outbound-thread only.
+    OuchResponder responder_;
 
-    absl::flat_hash_map<ClientId, ClientEndpoint> client_endpoints_;
+    // Indexed by ClientId. Written by inbound_ exactly once per client, on
+    // its first packet, and before anything from that client is pushed to
+    // notes_/the engine -- so the release/acquire on those rings is what
+    // makes an entry visible to outbound_ by the time it's needed.
+    std::array<ClientEndpoint, MAX_CLIENTS + 1> endpoints_{};
 
     // (src ip << 16 | src port) -> ClientId, assigned the first time a given
-    // endpoint is ever seen. There's no kernel TCP stack terminating
-    // connections here (packets are handled directly off the DPDK rx
-    // queue -- see server.cpp), so this endpoint pair is the closest thing
-    // to "session identity" this server has to key a client on.
+    // endpoint is ever seen. There's no TCP stack terminating connections
+    // here yet (packets are handled directly off the DPDK rx queue -- see
+    // server.cpp), so this endpoint pair is the closest thing to "session
+    // identity" this server has to key a client on. Inbound-thread only.
     absl::flat_hash_map<uint64_t, ClientId> client_ids_;
     ClientId next_client_id_ = 1; // 0 reserved as "no client"
 
-    ClientId resolve_client_id_(const PacketEndpoint &src, const TCPHeader &tcp);
+    // 0 if this is a new endpoint and MAX_CLIENTS are already taken.
+    ClientId resolve_client_id_(const PacketEndpoint &src, const PacketEndpoint &dst, const TCPHeader &tcp);
 
-    std::atomic<bool> shutdown_;
+    std::atomic<bool> shutdown_{false};
+    std::jthread inbound_thread_;
+    std::jthread outbound_thread_;
 
     void inbound_();
     void outbound_();
