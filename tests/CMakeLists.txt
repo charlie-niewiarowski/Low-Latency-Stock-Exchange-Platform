@@ -66,7 +66,9 @@ target_include_directories(server-tests PRIVATE ${SERVER_TEST_INCLUDES})
 # vdev instead of assuming a real hugepage-backed, PCI-bound NIC.
 target_compile_definitions(server-tests PRIVATE TESTING=1)
 target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map GTest::gtest_main)
-gtest_discover_tests(server-tests)
+# Each discovered test is its own process, and two EALs at once collide on
+# DPDK's runtime files: serialize everything that brings one up.
+gtest_discover_tests(server-tests PROPERTIES RESOURCE_LOCK dpdk_eal)
 
 # ── proto ────────────────────────────────────────────────────────────────────
 # Pure OUCH/ITCH wire codecs (ouch_proto.hpp/itch_proto.hpp, header-only in
@@ -96,6 +98,23 @@ target_include_directories(gateway-tests PRIVATE ${EXCHANGE_SRC}/server/include)
 target_link_libraries(gateway-tests PRIVATE infra absl::flat_hash_map GTest::gtest_main)
 gtest_discover_tests(gateway-tests)
 
+# ── client ───────────────────────────────────────────────────────────────────
+# The real LoadGenerator against an in-test SoupBinTCP/OUCH server on kernel
+# loopback (EXCHANGE_HOST:EXCHANGE_PORT from the client's config.hpp).
+
+find_package(Threads REQUIRED)
+add_executable(client-tests
+        client_tests.cpp
+        ${ROOT_SRC}/client/src/load_generator.cpp
+)
+target_include_directories(client-tests PRIVATE
+        ${ROOT_SRC}/client/include
+        ${ROOT_SRC}/client/config
+)
+target_link_libraries(client-tests PRIVATE infra Threads::Threads GTest::gtest_main)
+# Every test binds the same port.
+gtest_discover_tests(client-tests PROPERTIES RESOURCE_LOCK exchange_port)
+
 # ── packet_factory ───────────────────────────────────────────────────────────
 # packet_factory.hpp (src/infra) talk to the DPDK runtime
 # directly (packet_pool, ethernet/ipv4 header builders), so this target
@@ -109,4 +128,4 @@ target_include_directories(packet-factory-tests PRIVATE
         ${ROOT_SRC}/infra
 )
 target_link_libraries(packet-factory-tests PRIVATE infra dpdk_lib GTest::gtest_main)
-gtest_discover_tests(packet-factory-tests)
+gtest_discover_tests(packet-factory-tests PROPERTIES RESOURCE_LOCK dpdk_eal)

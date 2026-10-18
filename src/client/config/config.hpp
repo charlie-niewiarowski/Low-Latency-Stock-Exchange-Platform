@@ -28,6 +28,9 @@
                                       // decimal since $100.25 = (uint32_t)10025
 #define MID_PRICE_UPDATE_N 16 // how often the mid-price is updated
 
+// Every order is entered under this symbol (the exchange runs one book).
+#define CLIENT_SYMBOL "SIM"
+
 // Lognormal quantity distribution
 #define MEAN_QTY 100.0
 #define QTY_VOL 0.8
@@ -36,6 +39,11 @@
 #define EXCHANGE_HOST "127.0.0.1"
 #define EXCHANGE_PORT  4000
 #define CLIENT_CORE 4
+
+// SoupBinTCP login. The exchange accepts any credentials for now; the
+// session is left blank ("whatever session is current").
+#define SOUP_USERNAME "LOADGN"
+#define SOUP_PASSWORD "LOADGEN"
 
 // open-loop rate cap: aggregate orders / second across ALL clients.
 // The orchestrator divides this evenly so each client's inter-arrival time is
@@ -50,9 +58,14 @@
 //=============================================================================
 #define MAX_ACTIVE_ORDERS 32u
 
-// Number of requests kept in-flight per connection
+// Number of Enter orders kept in-flight per connection (Cancels/Replaces
+// don't occupy a slot -- see ClientState::acks_pending).
 // Throughput ceiling approx = num_clients × PIPELINE_DEPTH / RTT
 #define PIPELINE_DEPTH 32
+
+// Cap on messages per write batch: bounds how many Cancels/Replaces can ride
+// along while a batch fills its Enter slots.
+#define MAX_BATCH_MESSAGES (2 * PIPELINE_DEPTH)
 
 #define CLIENT_EPOLL_BATCH 512
 
