@@ -35,9 +35,9 @@ struct ResidentOrder {
 };
 
 // Fixed-capacity ring of recently-submitted resting orders, sampled as CANCEL/
-// MODIFY targets. Entries aren't removed when the order is later filled or
-// canceled elsewhere — a stale target just makes process() take its FAILURE
-// path (checked safely via orders_.find() before any orders_.at()), which is
+// MODIFY targets. Entries aren't removed when the order is later filled,
+// canceled or replaced elsewhere — a stale target just makes process() take
+// its ignored path (checked safely via orders_.find()), which is
 // realistic traffic in its own right (late/duplicate cancels happen on real
 // exchanges) and costs nothing extra to model.
 class ResidentPool {
@@ -97,7 +97,16 @@ int main(int argc, char** argv) {
     if (core >= 0) pin_to_core(static_cast<int>(core));
 
     OutboundRing out_ring(1u << 16);
-    Orderbook book(out_ring);
+    MarketDataRing market_data_ring(1u << 16);
+    Orderbook book(out_ring, market_data_ring);
+
+    const auto request = [](const EngineRequestType type, const OrderId id, const OrderId new_id,
+                            const ClientId cid, const Side side, const OrderType order_type,
+                            const Price price, const Quantity qty) {
+        return EngineRequest{.order_id = id, .new_order_id = new_id, .client_id = cid, .price = price,
+                             .quantity = qty, .type = type, .side = side, .order_type = order_type,
+                             .time_in_force = TimeInForce::DAY};
+    };
 
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> unit(0.0, 1.0);
@@ -152,8 +161,7 @@ int main(int argc, char** argv) {
                 const Quantity qty = qty_dist(rng);
                 const OrderId id = next_id++;
 
-                OrderRequest req(MessageType::NEW, id, cid, side, OrderType::LIMIT, price, qty);
-                book.process(req);
+                book.process(request(EngineRequestType::NEW, id, 0, cid, side, OrderType::LIMIT, price, qty), 0);
                 resting.push({id, cid, side});
                 ++new_limit;
                 break;
@@ -163,8 +171,7 @@ int main(int argc, char** argv) {
                 const Quantity qty = qty_dist(rng);
                 const OrderId id = next_id++;
 
-                OrderRequest req(MessageType::NEW, id, cid, side, OrderType::MARKET, 0, qty);
-                book.process(req);
+                book.process(request(EngineRequestType::NEW, id, 0, cid, side, OrderType::MARKET, 0, qty), 0);
                 ++new_market;
                 break;
             }
@@ -172,9 +179,10 @@ int main(int argc, char** argv) {
                 ++cancels;
                 if (resting.empty()) break;
                 const ResidentOrder& target = resting.sample(rng);
-                OrderRequest req(MessageType::CANCEL, target.id, target.client_id,
-                                  Side::BID, OrderType::LIMIT, 0, 0);
-                if (book.process(req).status == Status::SUCCESS) ++cancel_hits;
+                if (book.process(request(EngineRequestType::CANCEL, target.id, 0, target.client_id,
+                                         target.side, OrderType::LIMIT, 0, 0), 0)) {
+                    ++cancel_hits;
+                }
                 break;
             }
             case Op::MODIFY: {
@@ -186,17 +194,23 @@ int main(int argc, char** argv) {
                                                      ? mid - half_spread - depth
                                                      : mid + half_spread + depth);
                 const Quantity qty = qty_dist(rng);
-                OrderRequest req(MessageType::MODIFY, target.id, target.client_id,
-                                  target.side, OrderType::LIMIT, price, qty);
-                if (book.process(req).status == Status::SUCCESS) ++modify_hits;
+                // MODIFY is an OUCH replace: the order continues under a new id.
+                const OrderId new_id = next_id++;
+                if (book.process(request(EngineRequestType::REPLACE, target.id, new_id, target.client_id,
+                                         target.side, OrderType::LIMIT, price, qty), 0)) {
+                    ++modify_hits;
+                    resting.push({new_id, target.client_id, target.side});
+                }
                 break;
             }
         }
 
-        // out_ring_'s pushOut() spins if the ring is ever full, so keep it
-        // drained — a single process() call can emit several MATCH messages
-        // during a level sweep.
+        // emit() spins if out_ring is ever full, so keep it drained — a single
+        // process() call can emit several EXECUTED events during a level
+        // sweep. market_data_ring would only drop, but draining it keeps the
+        // measured path the push that a real consumer would see.
         while (out_ring.pop()) {}
+        while (market_data_ring.pop()) {}
     }
 
     std::printf("seed_ops=%llu ops=%llu new_limit=%llu new_market=%llu "

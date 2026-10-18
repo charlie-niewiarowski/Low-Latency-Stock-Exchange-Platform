@@ -5,12 +5,13 @@
 #ifndef RINGBUFFER_H
 #define RINGBUFFER_H
 
+#include "communication_proto.hpp"
+#include "itch_proto.hpp"
+
 #include <memory>
 #include <atomic>
 #include <cassert>
 #include <optional>
-
-#include "communication_types.hpp"
 
 template <typename T>
 class RingBuffer {
@@ -110,7 +111,12 @@ size_t RingBuffer<T>::size() const {
     return (mask + 1) + (write_idx - read_idx);
 }
 
-using InboundRing = RingBuffer<InboundMessage>;
-using OutboundRing = RingBuffer<OutboundMessage>;
+using InboundRing = RingBuffer<EngineRequest>;
+using OutboundRing = RingBuffer<EngineEvent>;
+
+// Engine -> market data dissemination. Until that consumer exists nothing
+// drains this ring, so the engine pushes best-effort and drops on full
+// rather than spinning (which would stall matching forever).
+using MarketDataRing = RingBuffer<ITCH>;
 
 #endif //RINGBUFFER_H

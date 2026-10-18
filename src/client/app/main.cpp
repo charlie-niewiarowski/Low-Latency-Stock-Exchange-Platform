@@ -6,7 +6,7 @@
 // Usage:
 //   client [num_clients] [rng_seed]
 //
-//   num_clients  – concurrent TCPHeader connections to open (default: 10)
+//   num_clients  – concurrent SoupBinTCP sessions to open (default: 10)
 //   rng_seed     – optional RNG seed for reproducibility (default: random)
 //
 // Runs until SIGINT / SIGTERM, then prints aggregate stats and throughput.
@@ -108,10 +108,12 @@ int main(const int argc, char* argv[]) {
                 responses_ack,
                 responses_match,
                 responses_err,
+                responses_canceled,
+                responses_replaced,
                 orders_in_flight]
     = orch.stats();
 
-    // matches not included
+    // Accepted/Rejected only: one per Enter (fills, cancels and replaces not included)
     const uint64_t total_responses = responses_ack + responses_err;
 
     // Guard against divide-by-zero if the user stops immediately.
@@ -124,6 +126,8 @@ int main(const int argc, char* argv[]) {
         "  ACK responses   : %llu\n"
         "  MATCH responses : %llu\n"
         "  ERR responses   : %llu\n"
+        "  CANCELED        : %llu\n"
+        "  REPLACED        : %llu\n"
         "  orders in flight: %lld\n"
         "  --- throughput ---\n"
         "  requests/s      : %.0f\n"
@@ -136,6 +140,8 @@ int main(const int argc, char* argv[]) {
         static_cast<unsigned long long>(responses_ack),
         static_cast<unsigned long long>(responses_match),
         static_cast<unsigned long long>(responses_err),
+        static_cast<unsigned long long>(responses_canceled),
+        static_cast<unsigned long long>(responses_replaced),
         -1LL * static_cast<long long>(orders_in_flight),
         static_cast<double>(requests_sent)   * inv,
         static_cast<double>(responses_ack)   * inv,

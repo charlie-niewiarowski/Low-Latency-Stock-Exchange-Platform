@@ -15,7 +15,6 @@
 #define ORDER_POOL_H
 
 #include "order.hpp"
-#include "order_request.hpp"
 #include "order_types.hpp"
 
 #include <cstddef>
@@ -37,13 +36,13 @@ public:
 
     ~OrderPool() = default;
 
-    // Hands out a reusable slot initialised as the requested Order.
+    // Hands out a reusable slot initialised as a copy of order.
     // Returns nullptr when the pool is exhausted.
-    Order* allocate(const OrderId id, const OrderRequest& request) {
+    Order* allocate(const Order& order) {
         if (free_list_.empty()) return nullptr;
         Order* slot = free_list_.back();
         free_list_.pop_back();
-        *slot = Order{id, request};   // resets prev_/next_ to nullptr as well
+        *slot = order;   // order is unlinked, so this resets prev_/next_ to nullptr as well
         return slot;
     }
 
