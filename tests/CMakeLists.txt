@@ -106,7 +106,7 @@ gtest_discover_tests(gateway-tests)
 
 # ── client ───────────────────────────────────────────────────────────────────
 # The real LoadGenerator against an in-test SoupBinTCP/OUCH server on kernel
-# loopback (EXCHANGE_HOST:EXCHANGE_PORT from the client's config.hpp).
+# loopback (EXCHANGE_HOST, overridden to 127.0.0.1, : EXCHANGE_PORT).
 
 find_package(Threads REQUIRED)
 add_executable(client-tests
@@ -117,6 +117,7 @@ target_include_directories(client-tests PRIVATE
         ${ROOT_SRC}/client/include
         ${ROOT_SRC}/client/config
 )
+target_compile_definitions(client-tests PRIVATE EXCHANGE_HOST="127.0.0.1")
 target_link_libraries(client-tests PRIVATE infra Threads::Threads GTest::gtest_main)
 # Every test binds the same port.
 gtest_discover_tests(client-tests PROPERTIES RESOURCE_LOCK exchange_port)

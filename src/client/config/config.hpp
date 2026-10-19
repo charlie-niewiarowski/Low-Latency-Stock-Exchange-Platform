@@ -36,13 +36,19 @@
 #define QTY_VOL 0.8
 
 //===== system config =====
-#define EXCHANGE_HOST "127.0.0.1"
+// The exchange's DPDK tap address (its config.hpp's EXCHANGE_IPV4); the
+// tests point this at loopback.
+#ifndef EXCHANGE_HOST
+#define EXCHANGE_HOST "10.77.0.2"
+#endif
 #define EXCHANGE_PORT  4000
 #define CLIENT_CORE 4
 
-// SoupBinTCP login. The exchange accepts any credentials for now; the
-// session is left blank ("whatever session is current").
-#define SOUP_USERNAME "LOADGN"
+// SoupBinTCP login. Each connection logs in as its own username -- the
+// prefix plus its 1-based index, e.g. "LG0001" -- since the exchange keys
+// sessions (orders, sequence numbers) on it. Any password is accepted for
+// now; the session is left blank ("whatever session is current").
+#define SOUP_USERNAME_PREFIX "LG"
 #define SOUP_PASSWORD "LOADGEN"
 
 // open-loop rate cap: aggregate orders / second across ALL clients.
