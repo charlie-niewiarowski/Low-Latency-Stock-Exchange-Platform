@@ -34,9 +34,9 @@ replay log. Nasdaq offers cancel-on-disconnect per port: when the session's conn
 lost, its resting orders are canceled (best effort; a Logout Request doesn't trigger it).
 
 - a config flag (and later per-username)
-- on `DISCONNECTED` (not a logout), the gateway cancels the session's live orders: either a
-  new engine request ("cancel everything for ClientId"), or the gateway walking
-  `OrderEntry`'s live orders and sending one Cancel each
+- on `DISCONNECTED` (not a logout), the gateway cancels the session's live orders with a
+  new engine request ("cancel everything for ClientId"). Only the engine knows which
+  orders are live: the gateway keeps no per-order state on the inbound side
 - the cancels land in the session's log, so a later re-login replays them as Order Canceled
 - tests: in `server-tests` (engine played by the test) and `server-tap-tests` (real engine)
 
@@ -53,6 +53,12 @@ the outbound thread works through the previous batch. Places to look:
 - done: RPS on the tap (`TAP_RPS_CORE`) and `kOutboundBatch` 32 -> 512, together 607k -> 936k
   req/s as root. Each tap write still costs ~6k kernel cycles; segments now average ~1230
   of 1514 bytes
+- done: two unbounded order maps. The responder now retires ignored replacements
+  (`REPLACE_IGNORED`), and the engine finds orders by (ClientId, ClientOrderRef), so
+  `OrderEntry` keeps no per-order map. Together 871k -> 1.10M req/s as root, RSS flat at
+  ~440 MB (was 2.8 GB after 20 s and growing), inbound p50 13 -> 6 µs
+- the responder's OrderId -> record map (~22% of the outbound thread): events could
+  echo `client_ref`, leaving only a short buffer of recent notes for the OUCH-only fields
 - then `stage_breakdown` again, run as root so `SCHED_FIFO` and core pinning are in effect
 
 ## 4. DPDK in the Docker image

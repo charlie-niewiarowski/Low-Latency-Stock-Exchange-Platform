@@ -143,14 +143,18 @@ inline EnterCheck check_enter(const OuchEnterOrder &m, const PriceBand band) noe
 }
 
 // What a valid Replace Order becomes on the engine side. Invalid replaces
-// aren't rejected: per spec they cancel the existing order instead.
+// aren't rejected: per spec they cancel the existing order instead. A side
+// appendage must repeat the original's side, which only the engine knows,
+// so that check is the engine's (side_given/side).
 struct ReplaceCheck {
     bool        valid = false;
     Price       price = 0;
     TimeInForce time_in_force{};
+    bool        side_given = false;
+    Side        side{};
 };
 
-inline ReplaceCheck check_replace(const OuchReplaceOrder &m, const char orig_side, const PriceBand band) noexcept {
+inline ReplaceCheck check_replace(const OuchReplaceOrder &m, const PriceBand band) noexcept {
     ReplaceCheck check;
     if (!detail::valid_quantity(m.quantity)) return check;
 
@@ -161,7 +165,12 @@ inline ReplaceCheck check_replace(const OuchReplaceOrder &m, const char orig_sid
     const std::optional<TimeInForce> tif = to_engine_tif(m.time_in_force);
     if (!tif) return check;
     if (m.display != 'Y' || m.intermarket_sweep_eligibility != 'N') return check;
-    if (m.appendage.has(OuchTag::SIDE) && m.side != orig_side) return check;
+    if (m.appendage.has(OuchTag::SIDE)) {
+        const std::optional<Side> side = to_engine_side(m.side);
+        if (!side) return check; // can't be the original's, whatever that is
+        check.side_given = true;
+        check.side = *side;
+    }
     if (detail::unsupported_option_reason(m) != 0) return check;
 
     check.valid = true;

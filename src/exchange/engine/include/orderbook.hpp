@@ -2,7 +2,7 @@
 // Orderbook — an autonomous price-time-priority order book.
 //
 // The Orderbook owns the full book state (the OrderPool, the per-price
-// PriceLevelQueues, and the OrderId -> Order* lookup map) and all of the
+// PriceLevelQueues, and the (client, ref) -> Order* lookup map) and all of the
 // mutating logic: entering, reducing, replacing, and matching orders.
 //
 // It is driven exclusively through process(EngineRequest), with Nasdaq OUCH
@@ -38,12 +38,19 @@
 // Book storage types
 //=============================================================================
 //
+// Orders are found the way clients name them, by (ClientId, ClientOrderRef)
+// packed into one key (see order_key()); OrderIds are only echoed.
 // The map does NOT own the Order objects — it stores non-owning pointers into
 // the OrderPool arena. Ownership is centralised in the pool (see order_pool.hpp).
 // The bid/ask arrays are indexed by (price - MIN_PRICE): one PriceLevelQueue
 // per tick.
 
-using OrderMap  = std::unordered_map<OrderId, Order*>;
+using OrderKey  = uint64_t;
+using OrderMap  = std::unordered_map<OrderKey, Order*>;
+
+inline OrderKey order_key(const ClientId client_id, const ClientOrderRef client_ref) {
+    return (static_cast<OrderKey>(client_id) << 32) | client_ref;
+}
 using BidLevels = std::array<PriceLevelQueue, MAX_PRICE - MIN_PRICE + 1>;
 using AskLevels = std::array<PriceLevelQueue, MAX_PRICE - MIN_PRICE + 1>;
 
@@ -79,10 +86,21 @@ public:
     size_t ask_level_count() const { return non_empty_ask_levels_; }
     size_t bids_at(Price p)  const { return bids_[p - MIN_PRICE].size(); }
     size_t asks_at(Price p)  const { return asks_[p - MIN_PRICE].size(); }
-    bool   has_order(OrderId id) const { return orders_.contains(id); }
-    Quantity open_quantity(OrderId id) const { return orders_.at(id)->open_quantity_; }
-    Quantity executed_quantity(OrderId id) const { return orders_.at(id)->executed_quantity_; }
+    // By OrderId, the way tests name orders: a linear scan, test-only.
+    bool   has_order(OrderId id) const { return find_by_id(id) != nullptr; }
+    Quantity open_quantity(OrderId id) const { return find_by_id(id)->open_quantity_; }
+    Quantity executed_quantity(OrderId id) const { return find_by_id(id)->executed_quantity_; }
     uint64_t market_data_drops() const { return market_data_drops_; }
+
+private:
+    const Order* find_by_id(const OrderId id) const {
+        for (const auto& [key, order] : orders_) {
+            if (order->id_ == id) return order;
+        }
+        return nullptr;
+    }
+
+public:
 #endif
 
 private:
@@ -99,7 +117,7 @@ private:
     OrderPool pool_;   // owns every Order; must outlive orders_/bids_/asks_ pointers
     BidLevels bids_;
     AskLevels asks_;
-    OrderMap  orders_; // OrderId -> Order* into pool_ (non-owning)
+    OrderMap  orders_; // order_key() -> Order* into pool_ (non-owning)
 
     Price  best_bid_price_{MIN_PRICE};
     Price  best_ask_price_{MAX_PRICE};

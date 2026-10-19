@@ -18,12 +18,16 @@ namespace {
 constexpr ClientId kAlice = 1;
 constexpr ClientId kBob   = 2;
 
+// Tests name an order by one number: its OrderId, and its owner's
+// ClientOrderRef too.
+ClientOrderRef Ref(const OrderId id) { return static_cast<ClientOrderRef>(id); }
+
 EngineRequest New(const OrderId id, const ClientId client, const Side side, const Price price,
                   const Quantity quantity, const TimeInForce tif = TimeInForce::DAY,
                   const OrderType type = OrderType::LIMIT) {
-    return EngineRequest{.order_id = id, .client_id = client, .price = price, .quantity = quantity,
-                         .type = EngineRequestType::NEW, .side = side, .order_type = type,
-                         .time_in_force = tif};
+    return EngineRequest{.order_id = id, .client_id = client, .client_ref = Ref(id), .price = price,
+                         .quantity = quantity, .type = EngineRequestType::NEW, .side = side,
+                         .order_type = type, .time_in_force = tif};
 }
 
 EngineRequest Market(const OrderId id, const ClientId client, const Side side, const Quantity quantity) {
@@ -31,15 +35,16 @@ EngineRequest Market(const OrderId id, const ClientId client, const Side side, c
 }
 
 EngineRequest Cancel(const OrderId id, const ClientId client, const Quantity quantity) {
-    return EngineRequest{.order_id = id, .client_id = client, .quantity = quantity,
+    return EngineRequest{.client_id = client, .client_ref = Ref(id), .quantity = quantity,
                          .type = EngineRequestType::CANCEL};
 }
 
 EngineRequest Replace(const OrderId id, const OrderId new_id, const ClientId client, const Price price,
                       const Quantity quantity, const TimeInForce tif = TimeInForce::DAY) {
-    return EngineRequest{.order_id = id, .new_order_id = new_id, .client_id = client, .price = price,
-                         .quantity = quantity, .type = EngineRequestType::REPLACE,
-                         .order_type = OrderType::LIMIT, .time_in_force = tif};
+    return EngineRequest{.order_id = new_id, .client_id = client, .client_ref = Ref(id),
+                         .new_client_ref = Ref(new_id), .price = price, .quantity = quantity,
+                         .type = EngineRequestType::REPLACE, .order_type = OrderType::LIMIT,
+                         .time_in_force = tif};
 }
 
 void ExpectEvent(const EngineEvent &e, const EngineEventType type, const OrderId id, const ClientId client,
@@ -327,6 +332,29 @@ TEST_F(OrderbookTest, ReplaceAtOrBelowExecutedSharesCancels) {
     EXPECT_EQ(book_->order_count(), 0u);
 }
 
+TEST_F(OrderbookTest, ReplaceNamingTheWrongSideCancels) {
+    Setup(New(1, kAlice, Side::BID, 990, 100));
+
+    EngineRequest same = Replace(1, 2, kAlice, 995, 100);
+    same.side_given = true;
+    same.side = Side::BID;
+    ASSERT_TRUE(Send(same));
+    EXPECT_EQ(Events().at(0).type, EngineEventType::REPLACED);
+    Itch();
+
+    EngineRequest wrong = Replace(2, 3, kAlice, 995, 100);
+    wrong.side_given = true;
+    wrong.side = Side::ASK;
+    ASSERT_TRUE(Send(wrong));
+
+    const auto events = Events();
+    ASSERT_EQ(events.size(), 2u);
+    ExpectEvent(events[0], EngineEventType::CANCELED, 2, kAlice, 995, 100);
+    EXPECT_EQ(events[1].type, EngineEventType::REPLACE_IGNORED);
+    EXPECT_EQ(events[1].order_id, 3u);
+    EXPECT_EQ(book_->order_count(), 0u);
+}
+
 TEST_F(OrderbookTest, MarketableReplaceTradesBeforeResting) {
     Setup(New(1, kAlice, Side::BID, 990, 100));
     Setup(New(2, kBob, Side::ASK, 1000, 60));
@@ -370,7 +398,7 @@ TEST_F(OrderbookTest, IgnoredReplaces) {
 
     EXPECT_FALSE(Send(Replace(9, 3, kAlice, 990, 100))); // unknown / dead original
     EXPECT_FALSE(Send(Replace(1, 3, kBob, 990, 100)));   // not Bob's order
-    EXPECT_FALSE(Send(Replace(1, 2, kAlice, 990, 100))); // replacement id already live
+    EXPECT_FALSE(Send(Replace(1, 2, kAlice, 990, 100))); // replacement ref already live
 
     // Nothing the client sees -- but the first two tell the gateway to drop
     // the replacement's record. The third's id belongs to a live order.

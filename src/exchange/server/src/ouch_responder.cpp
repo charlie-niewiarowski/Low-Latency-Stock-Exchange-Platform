@@ -67,13 +67,19 @@ std::optional<OuchResponse> OuchResponder::on_event(const EngineEvent &event, co
             return response;
 
         case EngineEventType::REPLACED: {
-            // Order Replaced names the original by its UserRefNum; the
-            // original is dead from here on.
+            // Order Replaced names the original by its UserRefNum, and the
+            // replacement inherits what a replace can't change (see
+            // OrderRecord). The original is dead from here on.
             const auto orig = orders_.find(event.orig_order_id);
             if (orig == orders_.end()) {
                 return std::nullopt;
             }
-            const uint32_t orig_user_ref_num = orig->second.record.user_ref_num;
+            const OrderRecord &orig_record = orig->second.record;
+            const uint32_t orig_user_ref_num = orig_record.user_ref_num;
+            order.record.side       = orig_record.side;
+            order.record.symbol     = orig_record.symbol;
+            order.record.capacity   = orig_record.capacity;
+            order.record.cross_type = orig_record.cross_type;
             orders_.erase(orig); // doesn't invalidate it/order/r (a different element)
 
             order.open = event.quantity;

@@ -69,7 +69,7 @@ void Orderbook::prefetch(const EngineRequest& next) const {
             // early-touch of the bucket's first node rather than a pure async
             // prefetch (see the plan's map-node caveat).
             if (orders_.bucket_count() == 0) return;
-            const size_t b = orders_.bucket(next.order_id);
+            const size_t b = orders_.bucket(order_key(next.client_id, next.client_ref));
             const auto lit = orders_.begin(b);
             if (lit != orders_.end(b)) prefetch_read(&*lit);
             break;
@@ -85,8 +85,8 @@ void Orderbook::prefetch(const EngineRequest& next) const {
 // remainder or cancel any other remainder (IOC / MARKET).
 bool Orderbook::enter(const Context& ctx) {
     const EngineRequest& req = ctx.req;
-    // OrderIds are gateway-assigned and unique; a repeat is a duplicate.
-    if (orders_.contains(req.order_id)) return false;
+    // The gateway only passes ClientOrderRefs that increase; a repeat is a duplicate.
+    if (orders_.contains(order_key(req.client_id, req.client_ref))) return false;
 
     const bool may_rest = req.order_type == OrderType::LIMIT && req.time_in_force == TimeInForce::DAY;
     if (may_rest && pool_.available() == 0) {
@@ -104,7 +104,7 @@ bool Orderbook::enter(const Context& ctx) {
     if (remaining == 0) return true;
 
     if (may_rest) {
-        rest(ctx, Order{req.order_id, req.client_id, req.side, req.price, remaining, filled});
+        rest(ctx, Order{req.order_id, req.client_id, req.client_ref, req.side, req.price, remaining, filled});
     } else {
         emit(ctx, {.order_id = req.order_id, .client_id = req.client_id, .price = req.price,
                    .quantity = remaining, .type = EngineEventType::CANCELED,
@@ -114,12 +114,12 @@ bool Orderbook::enter(const Context& ctx) {
 }
 
 // CANCEL: reduce to the intended size, in place (time priority kept), or
-// remove entirely at 0. A cancel that wouldn't reduce anything is
-// superfluous and ignored.
+// remove entirely at 0. A cancel that wouldn't reduce anything, or names
+// no live order of the client's, is ignored.
 bool Orderbook::cancel(const Context& ctx) {
     const EngineRequest& req = ctx.req;
-    const auto it = orders_.find(req.order_id);
-    if (it == orders_.end() || it->second->client_id_ != req.client_id) return false;
+    const auto it = orders_.find(order_key(req.client_id, req.client_ref));
+    if (it == orders_.end()) return false;
 
     Order* order = it->second;
     const Quantity target_open = open_after(req.quantity, order->executed_quantity_);
@@ -146,22 +146,22 @@ bool Orderbook::cancel(const Context& ctx) {
     return true;
 }
 
-// REPLACE: cancel the original and enter the replacement under
-// new_order_id at the back of its level, carrying the chain's executed
+// REPLACE: cancel the original and enter the replacement (order_id,
+// new_client_ref) at the back of its level, carrying the chain's executed
 // shares. The replacement trades like any incoming order; if it would rest
 // without trading, ITCH sees one Order Replace instead of Delete + Add.
 bool Orderbook::replace(const Context& ctx) {
     const EngineRequest& req = ctx.req;
-    const auto it = orders_.find(req.order_id);
-    if (it == orders_.end() || it->second->client_id_ != req.client_id) {
+    const auto it = orders_.find(order_key(req.client_id, req.client_ref));
+    if (it == orders_.end()) {
         // Silently ignored, as far as the client is concerned.
-        emit(ctx, {.order_id = req.new_order_id, .client_id = req.client_id,
+        emit(ctx, {.order_id = req.order_id, .client_id = req.client_id,
                    .type = EngineEventType::REPLACE_IGNORED});
         return false;
     }
-    // A duplicate id (a gateway bug): the live order owns that id's record, so
-    // no REPLACE_IGNORED either.
-    if (orders_.contains(req.new_order_id)) return false;
+    // A duplicate ref (a gateway bug): no REPLACE_IGNORED either, since the
+    // gateway may hold a record under this order_id for a live order.
+    if (orders_.contains(order_key(req.client_id, req.new_client_ref))) return false;
 
     Order* orig = it->second;
     const OrderId  orig_id  = orig->id_;
@@ -173,13 +173,15 @@ bool Orderbook::replace(const Context& ctx) {
     itch.order_delete = ItchOrderDelete{.header = itch_header(ctx, ItchMessageType::ORDER_DELETE),
                                         .order_reference_number = orig_id};
 
-    // The chain has already executed everything the replace would allow:
-    // nothing is left to replace into, so this amounts to a full cancel.
-    if (open == 0) {
+    // Either the replace named the wrong side -- invalid, and an invalid
+    // replace cancels the original (OUCH 2.2) -- or the chain has already
+    // executed everything it would allow, so nothing is left to replace
+    // into. Both amount to a full cancel.
+    if ((req.side_given && req.side != side) || open == 0) {
         emit(ctx, {.order_id = orig_id, .client_id = orig->client_id_, .price = orig->price_,
                    .quantity = orig->open_quantity_, .type = EngineEventType::CANCELED,
                    .reason = engine_reason::kUserRequested});
-        emit(ctx, {.order_id = req.new_order_id, .client_id = req.client_id,
+        emit(ctx, {.order_id = req.order_id, .client_id = req.client_id,
                    .type = EngineEventType::REPLACE_IGNORED}); // the replacement never exists
         unlink(orig);
         release(orig);
@@ -190,16 +192,16 @@ bool Orderbook::replace(const Context& ctx) {
     unlink(orig);
     release(orig); // frees the pool slot the replacement may need
 
-    emit(ctx, {.order_id = req.new_order_id, .orig_order_id = orig_id, .client_id = req.client_id,
+    emit(ctx, {.order_id = req.order_id, .orig_order_id = orig_id, .client_id = req.client_id,
                .price = req.price, .quantity = open, .type = EngineEventType::REPLACED});
 
     const bool day = req.time_in_force == TimeInForce::DAY;
     if (day && !crosses(side, OrderType::LIMIT, req.price)) {
-        rest(ctx, Order{req.new_order_id, req.client_id, side, req.price, open, executed},
+        rest(ctx, Order{req.order_id, req.client_id, req.new_client_ref, side, req.price, open, executed},
              /*publish_add=*/false);
         itch.order_replace = ItchOrderReplace{.header = itch_header(ctx, ItchMessageType::ORDER_REPLACE),
                                               .original_order_reference_number = orig_id,
-                                              .new_order_reference_number = req.new_order_id,
+                                              .new_order_reference_number = req.order_id,
                                               .shares = open,
                                               .price = validation::to_itch_price(req.price)};
         publish(itch);
@@ -207,15 +209,16 @@ bool Orderbook::replace(const Context& ctx) {
     }
 
     publish(itch); // Delete of the original; the replacement trades first
-    const Quantity filled = match(ctx, req.new_order_id, req.client_id, side, OrderType::LIMIT,
+    const Quantity filled = match(ctx, req.order_id, req.client_id, side, OrderType::LIMIT,
                                   req.price, open);
     const Quantity remaining = open - filled;
     if (remaining == 0) return true;
 
     if (day) {
-        rest(ctx, Order{req.new_order_id, req.client_id, side, req.price, remaining, executed + filled});
+        rest(ctx, Order{req.order_id, req.client_id, req.new_client_ref, side, req.price, remaining,
+                        executed + filled});
     } else {
-        emit(ctx, {.order_id = req.new_order_id, .client_id = req.client_id, .price = req.price,
+        emit(ctx, {.order_id = req.order_id, .client_id = req.client_id, .price = req.price,
                    .quantity = remaining, .type = EngineEventType::CANCELED,
                    .reason = engine_reason::kImmediateOrCancel});
     }
@@ -285,7 +288,7 @@ void Orderbook::rest(const Context& ctx, const Order& order, const bool publish_
     // Callers guarantee a free slot: enter() checks up front, replace() frees
     // the original first.
     Order* resting = pool_.allocate(order);
-    orders_.emplace(resting->id_, resting);
+    orders_.emplace(order_key(resting->client_id_, resting->client_ref_), resting);
 
     const Price price = resting->price_;
     if (resting->side_ == Side::BID) {
@@ -331,7 +334,7 @@ void Orderbook::unlink(Order* order) {
 }
 
 void Orderbook::release(Order* order) {
-    orders_.erase(order->id_);
+    orders_.erase(order_key(order->client_id_, order->client_ref_));
     pool_.deallocate(order);   // return the slot to the pool for reuse
 }
 

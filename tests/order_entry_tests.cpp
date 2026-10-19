@@ -142,21 +142,29 @@ TEST(Validation, ReplaceRules) {
     const auto valid = [](auto mutate) {
         OuchReplaceOrder m = MakeReplace(1, 2);
         mutate(m);
-        return validation::check_replace(m, 'B', kBand).valid;
+        return validation::check_replace(m, kBand).valid;
     };
 
     EXPECT_TRUE(valid([](auto &) {}));
-    EXPECT_TRUE(valid([](auto &m) { m.side = 'B'; m.appendage.set(OuchTag::SIDE); }));
-    EXPECT_FALSE(valid([](auto &m) { m.side = 'S'; m.appendage.set(OuchTag::SIDE); }));
+    EXPECT_TRUE(valid([](auto &m) { m.side = 'S'; m.appendage.set(OuchTag::SIDE); })); // the engine's to check
+    EXPECT_FALSE(valid([](auto &m) { m.side = 'T'; m.appendage.set(OuchTag::SIDE); }));
     EXPECT_FALSE(valid([](auto &m) { m.quantity = 0; }));
     EXPECT_FALSE(valid([](auto &m) { m.price = kOuchMarketPriceFloor; })); // can't replace to market
     EXPECT_FALSE(valid([](auto &m) { m.time_in_force = '6'; }));
     EXPECT_FALSE(valid([](auto &m) { m.display = 'N'; }));
     EXPECT_FALSE(valid([](auto &m) { m.min_qty = 100; m.appendage.set(OuchTag::MIN_QTY); }));
 
-    const validation::ReplaceCheck check = validation::check_replace(MakeReplace(1, 2), 'B', kBand);
+    const validation::ReplaceCheck check = validation::check_replace(MakeReplace(1, 2), kBand);
     EXPECT_EQ(check.price, 15'010u);
     EXPECT_EQ(check.time_in_force, TimeInForce::IOC);
+    EXPECT_FALSE(check.side_given);
+
+    OuchReplaceOrder sided = MakeReplace(1, 2);
+    sided.side = 'S';
+    sided.appendage.set(OuchTag::SIDE);
+    const validation::ReplaceCheck sided_check = validation::check_replace(sided, kBand);
+    EXPECT_TRUE(sided_check.side_given);
+    EXPECT_EQ(sided_check.side, Side::ASK);
 }
 
 //=============================================================================
@@ -181,6 +189,7 @@ TEST(OrderEntry, EnterProducesNoteThenNewRequest) {
     EXPECT_EQ(t.request->type, EngineRequestType::NEW);
     EXPECT_EQ(t.request->order_id, 1u);
     EXPECT_EQ(t.request->client_id, 7u);
+    EXPECT_EQ(t.request->client_ref, 1u);
     EXPECT_EQ(t.request->side, Side::BID);
     EXPECT_EQ(t.request->order_type, OrderType::LIMIT);
     EXPECT_EQ(t.request->price, 15'025u);
@@ -240,15 +249,18 @@ TEST(OrderEntry, RejectedEnterConsumesUserRefNumButNotAnOrderId) {
     ASSERT_TRUE(next.request);
     EXPECT_EQ(next.request->order_id, 1u);
 
-    // A rejected order was never entered, so it can't be canceled.
-    EXPECT_TRUE(Empty(entry.translate(1, Frame(MakeCancel(1, 0)))));
+    // A rejected order was never entered, but only the engine can tell: the
+    // cancel goes through, for it to ignore.
+    const Translation cancel = entry.translate(1, Frame(MakeCancel(1, 0)));
+    ASSERT_TRUE(cancel.request);
+    EXPECT_EQ(cancel.request->client_ref, 1u);
 }
 
 //=============================================================================
 // OrderEntry -- Cancel
 //=============================================================================
 
-TEST(OrderEntry, CancelResolvesOrderIdWithoutWaitingForTheEngine) {
+TEST(OrderEntry, CancelNamesItsTargetByUserRefNum) {
     OrderEntry entry{kBand};
     ASSERT_TRUE(entry.translate(1, Frame(MakeEnter(1))).request);
 
@@ -257,12 +269,13 @@ TEST(OrderEntry, CancelResolvesOrderIdWithoutWaitingForTheEngine) {
     EXPECT_FALSE(t.note);
     ASSERT_TRUE(t.request);
     EXPECT_EQ(t.request->type, EngineRequestType::CANCEL);
-    EXPECT_EQ(t.request->order_id, 1u);
     EXPECT_EQ(t.request->client_id, 1u);
+    EXPECT_EQ(t.request->client_ref, 1u);
     EXPECT_EQ(t.request->quantity, 200u);
 }
 
-TEST(OrderEntry, CancelOfUnknownOrOtherClientsOrderIsIgnored) {
+// A UserRefNum the client hasn't used yet names nothing; the engine never sees it.
+TEST(OrderEntry, CancelOfUnusedUserRefNumIsIgnored) {
     OrderEntry entry{kBand};
     ASSERT_TRUE(entry.translate(1, Frame(MakeEnter(1))).request);
 
@@ -274,7 +287,7 @@ TEST(OrderEntry, CancelOfUnknownOrOtherClientsOrderIsIgnored) {
 // OrderEntry -- Replace
 //=============================================================================
 
-TEST(OrderEntry, ReplaceAssignsNewOrderIdAndKeepsOriginalFields) {
+TEST(OrderEntry, ReplaceAssignsNewOrderIdAndLeavesInheritedFieldsToTheResponder) {
     OrderEntry entry{kBand};
     ASSERT_TRUE(entry.translate(1, Frame(MakeEnter(1))).request);
 
@@ -288,26 +301,26 @@ TEST(OrderEntry, ReplaceAssignsNewOrderIdAndKeepsOriginalFields) {
     EXPECT_EQ(t.note->record.price, 1'501'000u);
     EXPECT_EQ(t.note->record.cl_ord_id, Pad<14>("REPLACED"));
     EXPECT_EQ(t.note->record.time_in_force, '3');
-    EXPECT_EQ(t.note->record.side, 'B');                // inherited
-    EXPECT_EQ(t.note->record.symbol, Pad<8>("AAPL"));   // inherited
-    EXPECT_EQ(t.note->record.capacity, 'A');            // inherited
+    EXPECT_EQ(t.note->record.side, 0);                  // inherited: the responder's to fill
+    EXPECT_EQ(t.note->record.capacity, 0);
 
     ASSERT_TRUE(t.request);
     EXPECT_EQ(t.request->type, EngineRequestType::REPLACE);
-    EXPECT_EQ(t.request->order_id, 1u);
-    EXPECT_EQ(t.request->new_order_id, 2u);
-    EXPECT_EQ(t.request->side, Side::BID);
+    EXPECT_EQ(t.request->order_id, 2u);
+    EXPECT_EQ(t.request->client_ref, 1u);
+    EXPECT_EQ(t.request->new_client_ref, 2u);
+    EXPECT_FALSE(t.request->side_given);
     EXPECT_EQ(t.request->price, 15'010u);
     EXPECT_EQ(t.request->quantity, 600u);
     EXPECT_EQ(t.request->time_in_force, TimeInForce::IOC);
 
-    // Both UserRefNums of the chain resolve.
+    // Both UserRefNums of the chain can be canceled.
     const Translation cancel_new = entry.translate(1, Frame(MakeCancel(2, 0)));
     ASSERT_TRUE(cancel_new.request);
-    EXPECT_EQ(cancel_new.request->order_id, 2u);
+    EXPECT_EQ(cancel_new.request->client_ref, 2u);
     const Translation cancel_orig = entry.translate(1, Frame(MakeCancel(1, 0)));
     ASSERT_TRUE(cancel_orig.request);
-    EXPECT_EQ(cancel_orig.request->order_id, 1u);
+    EXPECT_EQ(cancel_orig.request->client_ref, 1u);
 }
 
 TEST(OrderEntry, ReplaceWithUnknownOriginalOrUsedUserRefNumIsIgnored) {
@@ -333,7 +346,7 @@ TEST(OrderEntry, InvalidReplaceCancelsTheOriginalWithoutConsumingTheUserRefNum) 
     EXPECT_FALSE(t.note);
     ASSERT_TRUE(t.request);
     EXPECT_EQ(t.request->type, EngineRequestType::CANCEL);
-    EXPECT_EQ(t.request->order_id, 1u);
+    EXPECT_EQ(t.request->client_ref, 1u);
     EXPECT_EQ(t.request->quantity, 0u);
 
     const Translation retry = entry.translate(1, Frame(MakeReplace(1, 2)));

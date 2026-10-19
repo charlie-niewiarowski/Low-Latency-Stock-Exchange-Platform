@@ -20,10 +20,10 @@ public:
     // arena; allocate() overwrites every field before the Order is handed out.
     Order() = default;
 
-    Order(const OrderId id, const ClientId client_id, const Side side, const Price price,
-          const Quantity open_quantity, const Quantity executed_quantity)
+    Order(const OrderId id, const ClientId client_id, const ClientOrderRef client_ref, const Side side,
+          const Price price, const Quantity open_quantity, const Quantity executed_quantity)
         : id_(id), client_id_(client_id), price_(price), open_quantity_(open_quantity),
-          executed_quantity_(executed_quantity), side_(side) {}
+          executed_quantity_(executed_quantity), client_ref_(client_ref), side_(side) {}
 
     [[nodiscard]] bool is_filled() const { return open_quantity_ == 0; }
 
@@ -42,8 +42,9 @@ private:
     Price price_;                 // 4 bytes  @ 28
     Quantity open_quantity_;      // 4 bytes  @ 32  |  shares still on the book
     Quantity executed_quantity_;  // 4 bytes  @ 36  |  executed across the whole order/replace chain
-    Side side_;                   // 1 byte   @ 40
-    uint8_t padding[7];           // 7 bytes  @ 41
+    ClientOrderRef client_ref_;   // 4 bytes  @ 40  |  the owner's name for it (OUCH UserRefNum)
+    Side side_;                   // 1 byte   @ 44
+    uint8_t padding[3];           // 3 bytes  @ 45
 }; // 48 bytes (sizeof verified by compiler)
 static_assert(sizeof(Order) == 48);
 

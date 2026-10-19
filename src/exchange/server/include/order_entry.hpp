@@ -6,13 +6,14 @@
 // Session-agnostic: it's handed one decoded OUCH message plus the ClientId
 // of the session it arrived on, and owns everything protocol-level about
 // order entry -- UserRefNum sequencing, validation, OUCH -> engine field
-// conversion, and (ClientId, UserRefNum) -> OrderId assignment. It never
-// touches the network or the rings, so it can be tested directly; Server
-// drives it from the inbound thread and is its only user.
+// conversion, and OrderId assignment. It never touches the network or the
+// rings, so it can be tested directly; Server drives it from the inbound
+// thread and is its only user.
 //
-// OrderIds are assigned here, at Enter/Replace time, so a Cancel/Replace
-// that arrives before the engine has even seen the original order still
-// resolves -- nothing waits on an engine round trip.
+// It keeps no per-order state: a Cancel/Replace names its target by
+// UserRefNum, which the engine looks up itself (as the request's
+// client_ref), so whether that order is live -- or ever was -- is the
+// engine's call. All that's kept is each client's last UserRefNum.
 //
 
 #ifndef ORDER_ENTRY_H
@@ -29,7 +30,10 @@
 #include <optional>
 
 // The OUCH-side facts about an order that acks have to echo back (Accepted
-// and Replaced repeat the request's fields) but the engine never needs.
+// and Replaced repeat the request's fields) but the engine never needs. A
+// replacement's side, symbol, capacity and cross_type are the original's,
+// which only the outbound side still has: OrderEntry leaves them unset and
+// OuchResponder fills them in on REPLACED.
 struct OrderRecord {
     ClientId        client_id;
     uint32_t        user_ref_num;
@@ -56,7 +60,8 @@ struct OrderRecord {
 struct GatewayNote {
     enum class Kind : uint8_t {
         ORDER_ENTERED,    // order_id is a new order; record is what to echo on ACCEPTED
-        ORDER_REPLACING,  // order_id is a replacement; record is what to echo on REPLACED
+        ORDER_REPLACING,  // order_id is a replacement; record is what to echo on REPLACED,
+                          // less the fields it inherits (see OrderRecord)
         REJECTED,         // gateway-level reject; record identifies the rejected message
     };
 
@@ -84,34 +89,23 @@ public:
     Translation translate(ClientId client_id, const OuchInboundFrame &msg);
 
 private:
-    struct LiveOrder {
-        OrderId     order_id;
-        OrderRecord record;
-    };
-
     struct ClientState {
         uint32_t last_user_ref_num = 0; // UserRefNums start at 1
     };
 
     Translation enter_(ClientId client_id, const OuchEnterOrder &msg);
-    Translation cancel_(ClientId client_id, const OuchCancelOrder &msg) const;
+    Translation cancel_(ClientId client_id, const OuchCancelOrder &msg);
     Translation replace_(ClientId client_id, const OuchReplaceOrder &msg);
 
-    static uint64_t key_(ClientId client_id, uint32_t user_ref_num) {
-        return (static_cast<uint64_t>(client_id) << 32) | user_ref_num;
-    }
+    // Whether client has used user_ref_num (on an order or a reject) --
+    // anything else names no order at all.
+    bool issued_(ClientId client_id, uint32_t user_ref_num);
+    static EngineRequest cancel_request_(ClientId client_id, uint32_t user_ref_num, uint32_t quantity);
 
     validation::PriceBand band_;
     OrderId next_order_id_ = 1;
 
     absl::flat_hash_map<ClientId, ClientState> clients_;
-
-    // (ClientId, UserRefNum) -> order. Never erased: UserRefNums are
-    // day-unique, so a dead entry can't be confused with a new order, and
-    // a Cancel/Replace that resolves to a dead order is exactly what the
-    // engine's silent-ignore handling exists for. The cost is one entry
-    // per order entered today.
-    absl::flat_hash_map<uint64_t, LiveOrder> orders_;
 };
 
 #endif // ORDER_ENTRY_H

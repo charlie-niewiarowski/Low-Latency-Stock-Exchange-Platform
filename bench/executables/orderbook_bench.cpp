@@ -103,7 +103,11 @@ int main(int argc, char** argv) {
     const auto request = [](const EngineRequestType type, const OrderId id, const OrderId new_id,
                             const ClientId cid, const Side side, const OrderType order_type,
                             const Price price, const Quantity qty) {
-        return EngineRequest{.order_id = id, .new_order_id = new_id, .client_id = cid, .price = price,
+        // Each id doubles as its owner's ClientOrderRef.
+        const bool replace = type == EngineRequestType::REPLACE;
+        return EngineRequest{.order_id = replace ? new_id : id, .client_id = cid,
+                             .client_ref = static_cast<ClientOrderRef>(id),
+                             .new_client_ref = static_cast<ClientOrderRef>(new_id), .price = price,
                              .quantity = qty, .type = type, .side = side, .order_type = order_type,
                              .time_in_force = TimeInForce::DAY};
     };

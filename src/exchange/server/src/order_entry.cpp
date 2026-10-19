@@ -54,7 +54,6 @@ Translation OrderEntry::enter_(const ClientId client_id, const OuchEnterOrder &m
     }
 
     const OrderId order_id = next_order_id_++;
-    orders_.emplace(key_(client_id, msg.user_ref_num), LiveOrder{order_id, record});
 
     return {
         .note = GatewayNote{.kind = GatewayNote::Kind::ORDER_ENTERED, .reject_reason = 0,
@@ -64,14 +63,17 @@ Translation OrderEntry::enter_(const ClientId client_id, const OuchEnterOrder &m
             .recv_tsc        = 0,
             .server_push_tsc = 0,
             .order_id        = order_id,
-            .new_order_id    = 0,
             .client_id       = client_id,
+            .client_ref      = msg.user_ref_num,
+            .new_client_ref  = 0,
             .price           = check.price,
             .quantity        = msg.quantity,
             .type            = EngineRequestType::NEW,
             .side            = check.side,
             .order_type      = check.order_type,
             .time_in_force   = check.time_in_force,
+            .side_given      = false,
+            .padding         = {},
         },
     };
 }
@@ -80,31 +82,15 @@ Translation OrderEntry::enter_(const ClientId client_id, const OuchEnterOrder &m
 // Cancel Order
 //=============================================================================
 //
-// No ack of its own -- the engine's CANCELED event is the only response --
-// and an unknown UserRefNum is silently ignored, as is cancelling an order
-// that's already dead (the engine's call, since only it knows).
+// No ack of its own -- the engine's CANCELED event is the only response.
+// A cancel of an order that's unknown or already dead is silently ignored:
+// here for a UserRefNum the client hasn't used yet, by the engine otherwise.
 
-Translation OrderEntry::cancel_(const ClientId client_id, const OuchCancelOrder &msg) const {
-    const auto it = orders_.find(key_(client_id, msg.user_ref_num));
-    if (it == orders_.end()) {
+Translation OrderEntry::cancel_(const ClientId client_id, const OuchCancelOrder &msg) {
+    if (!issued_(client_id, msg.user_ref_num)) {
         return {};
     }
-
-    const LiveOrder &order = it->second;
-    return {.request = EngineRequest{
-        .read_begin_tsc  = 0,
-        .recv_tsc        = 0,
-        .server_push_tsc = 0,
-        .order_id        = order.order_id,
-        .new_order_id    = 0,
-        .client_id       = client_id,
-        .price           = 0,
-        .quantity        = msg.quantity,
-        .type            = EngineRequestType::CANCEL,
-        .side            = *validation::to_engine_side(order.record.side),
-        .order_type      = OrderType::LIMIT,
-        .time_in_force   = TimeInForce::DAY,
-    }};
+    return {.request = cancel_request_(client_id, msg.user_ref_num, msg.quantity)};
 }
 
 //=============================================================================
@@ -117,56 +103,45 @@ Translation OrderEntry::cancel_(const ClientId client_id, const OuchCancelOrder 
 //   * invalid replace details: the existing order is canceled instead,
 //     replacement UserRefNum not consumed
 //   * otherwise: cancel + new under a new OrderId, losing time priority
-// A replace of an original that's known here but already dead in the book
-// is the engine's to ignore.
+// An original this gateway can't rule out -- a UserRefNum the client has
+// used -- goes to the engine, which ignores it if no such order is live. So
+// does the side check (the original's side is the engine's to know). Both
+// of those then consume the replacement UserRefNum, a deviation from the
+// spec only a client replacing a rejected or mis-sided order can see.
 
 Translation OrderEntry::replace_(const ClientId client_id, const OuchReplaceOrder &msg) {
-    const auto orig = orders_.find(key_(client_id, msg.orig_user_ref_num));
-    if (orig == orders_.end()) {
+    if (!issued_(client_id, msg.orig_user_ref_num)) {
         return {};
     }
-
     ClientState &client = clients_[client_id];
     if (msg.user_ref_num <= client.last_user_ref_num) {
         return {};
     }
 
-    const OrderId orig_order_id = orig->second.order_id;
-    const OrderRecord &orig_record = orig->second.record;
-    const Side side = *validation::to_engine_side(orig_record.side);
-
-    const validation::ReplaceCheck check = validation::check_replace(msg, orig_record.side, band_);
+    const validation::ReplaceCheck check = validation::check_replace(msg, band_);
     if (!check.valid) {
-        return {.request = EngineRequest{
-            .read_begin_tsc  = 0,
-            .recv_tsc        = 0,
-            .server_push_tsc = 0,
-            .order_id        = orig_order_id,
-            .new_order_id    = 0,
-            .client_id       = client_id,
-            .price           = 0,
-            .quantity        = 0,
-            .type            = EngineRequestType::CANCEL,
-            .side            = side,
-            .order_type      = OrderType::LIMIT,
-            .time_in_force   = TimeInForce::DAY,
-        }};
+        return {.request = cancel_request_(client_id, msg.orig_user_ref_num, 0)};
     }
     client.last_user_ref_num = msg.user_ref_num;
 
-    OrderRecord record = orig_record;
-    record.user_ref_num                  = msg.user_ref_num;
-    record.quantity                      = msg.quantity;
-    record.price                         = msg.price;
-    record.cl_ord_id                     = msg.cl_ord_id;
-    record.time_in_force                 = msg.time_in_force;
-    record.display                       = msg.display;
-    record.intermarket_sweep_eligibility = msg.intermarket_sweep_eligibility;
+    // side, symbol, capacity and cross_type are the original's; the
+    // responder fills them in (see OrderRecord).
+    const OrderRecord record{
+        .client_id                     = client_id,
+        .user_ref_num                  = msg.user_ref_num,
+        .quantity                      = msg.quantity,
+        .price                         = msg.price,
+        .symbol                        = {},
+        .cl_ord_id                     = msg.cl_ord_id,
+        .side                          = 0,
+        .time_in_force                 = msg.time_in_force,
+        .display                       = msg.display,
+        .capacity                      = 0,
+        .intermarket_sweep_eligibility = msg.intermarket_sweep_eligibility,
+        .cross_type                    = 0,
+    };
 
     const OrderId new_order_id = next_order_id_++;
-    // emplace may rehash and invalidate orig/orig_record -- nothing below uses them.
-    orders_.emplace(key_(client_id, msg.user_ref_num), LiveOrder{new_order_id, record});
-
     return {
         .note = GatewayNote{.kind = GatewayNote::Kind::ORDER_REPLACING, .reject_reason = 0,
                             .order_id = new_order_id, .record = record},
@@ -174,15 +149,47 @@ Translation OrderEntry::replace_(const ClientId client_id, const OuchReplaceOrde
             .read_begin_tsc  = 0,
             .recv_tsc        = 0,
             .server_push_tsc = 0,
-            .order_id        = orig_order_id,
-            .new_order_id    = new_order_id,
+            .order_id        = new_order_id,
             .client_id       = client_id,
+            .client_ref      = msg.orig_user_ref_num,
+            .new_client_ref  = msg.user_ref_num,
             .price           = check.price,
             .quantity        = msg.quantity,
             .type            = EngineRequestType::REPLACE,
-            .side            = side,
+            .side            = check.side,
             .order_type      = OrderType::LIMIT,
             .time_in_force   = check.time_in_force,
+            .side_given      = check.side_given,
+            .padding         = {},
         },
+    };
+}
+
+//=============================================================================
+// helpers
+//=============================================================================
+
+bool OrderEntry::issued_(const ClientId client_id, const uint32_t user_ref_num) {
+    return user_ref_num != 0 && user_ref_num <= clients_[client_id].last_user_ref_num;
+}
+
+EngineRequest OrderEntry::cancel_request_(const ClientId client_id, const uint32_t user_ref_num,
+                                          const uint32_t quantity) {
+    return EngineRequest{
+        .read_begin_tsc  = 0,
+        .recv_tsc        = 0,
+        .server_push_tsc = 0,
+        .order_id        = 0,
+        .client_id       = client_id,
+        .client_ref      = user_ref_num,
+        .new_client_ref  = 0,
+        .price           = 0,
+        .quantity        = quantity,
+        .type            = EngineRequestType::CANCEL,
+        .side            = Side::BID, // unused
+        .order_type      = OrderType::LIMIT,
+        .time_in_force   = TimeInForce::DAY,
+        .side_given      = false,
+        .padding         = {},
     };
 }

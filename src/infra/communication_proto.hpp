@@ -16,11 +16,17 @@
 // the SPSC rings. These are engine-domain messages, not OUCH: the server
 // does every protocol-level job before a request reaches the engine
 // (validation, OUCH 4-decimal price -> engine cents, market-order sentinel
-// detection, (client, UserRefNum) -> OrderId resolution) and turns every
-// engine event back into OUCH afterwards, echoing the OUCH-only fields
-// (ClOrdID, capacity, display, ...) it kept from the original request. The
-// engine never sees a wire format, and each message stays about one
-// cache line.
+// detection, OrderId assignment) and turns every engine event back into
+// OUCH afterwards, echoing the OUCH-only fields (ClOrdID, capacity,
+// display, ...) it kept from the original request. The engine never sees a
+// wire format, and each message stays about one cache line.
+//
+// Orders are named two ways. The client names its own orders by
+// ClientOrderRef (OUCH's UserRefNum), and a Cancel/Replace names its target
+// that way: the engine finds orders by (client_id, client_ref), so a client
+// can only ever reach its own. The OrderId is the exchange's anonymous name
+// for an order -- the Order Reference Number in ITCH and OUCH acks -- which
+// the gateway assigns and the engine only echoes.
 //
 // Quantities follow Nasdaq OUCH semantics, which the engine owns because it
 // is the only component that knows how much of an order chain has executed:
@@ -30,7 +36,7 @@
 //              Keeps time priority.
 //   REPLACE -- total shares liable for the whole chain, inclusive of shares
 //              already executed. Always loses time priority (it's a cancel
-//              plus a new order under new_order_id).
+//              plus a new order under new_client_ref / order_id).
 
 enum class EngineRequestType : uint8_t { NEW = 0, CANCEL = 1, REPLACE = 2 };
 
@@ -39,28 +45,32 @@ struct EngineRequest { // gateway -> engine
     Timestamp recv_tsc;         // 8 bytes  @ 8
     Timestamp server_push_tsc;  // 8 bytes  @ 16
 
-    OrderId order_id;           // 8 bytes  @ 24  |  NEW: id to assign; CANCEL/REPLACE: existing order
-    OrderId new_order_id;       // 8 bytes  @ 32  |  REPLACE only: id of the replacement order
-    ClientId client_id;         // 4 bytes  @ 40
+    OrderId order_id;           // 8 bytes  @ 24  |  NEW: the order's id; REPLACE: the replacement's; CANCEL: unused
+    ClientId client_id;         // 4 bytes  @ 32
+    ClientOrderRef client_ref;  // 4 bytes  @ 36  |  NEW: the order's; CANCEL/REPLACE: the target's
+    ClientOrderRef new_client_ref; // 4 bytes @ 40 |  REPLACE only: the replacement's
     Price price;                // 4 bytes  @ 44  |  cents; ignored for MARKET and CANCEL
     Quantity quantity;          // 4 bytes  @ 48  |  see the semantics above
     EngineRequestType type;     // 1 byte   @ 52
-    Side side;                  // 1 byte   @ 53  |  NEW only; a replace keeps its order's side
+    Side side;                  // 1 byte   @ 53  |  NEW: the order's side; REPLACE: see side_given
     OrderType order_type;       // 1 byte   @ 54
     TimeInForce time_in_force;  // 1 byte   @ 55
-}; // 56 bytes
-static_assert(sizeof(EngineRequest) == 56);
+    bool side_given;            // 1 byte   @ 56  |  REPLACE only: the replace named a side, which
+                                //                   must be the original's (else it's invalid)
+    uint8_t padding[7];         // 7 bytes  @ 57
+}; // 64 bytes
+static_assert(sizeof(EngineRequest) == 64);
 
 // Every event is about one order and goes to that order's owner. A request
 // can produce several (e.g. an aggressive NEW: ACCEPTED, then one EXECUTED
 // per fill, then CANCELED for an IOC remainder), and the counterparty of
 // each fill gets its own EXECUTED; the first one is flagged answers_request.
-// Requests the Nasdaq spec says to ignore silently (cancel of a dead order,
-// replace of a dead order) produce no client-visible event -- except that a
-// replace that doesn't go ahead produces REPLACE_IGNORED for its replacement
-// (order_id = the replacement's id): the gateway already holds that order's
-// record from its note, and this is how it learns to drop it. No OUCH message
-// is sent for it.
+// Requests the Nasdaq spec says to ignore silently (cancel of a dead or
+// unknown order, replace of one) produce no client-visible event -- except
+// that a replace that doesn't go ahead produces REPLACE_IGNORED for its
+// replacement (order_id = the replacement's id): the gateway already holds
+// that order's record from its note, and this is how it learns to drop it.
+// No OUCH message is sent for it.
 enum class EngineEventType : uint8_t {
     ACCEPTED = 0, REPLACED = 1, CANCELED = 2, EXECUTED = 3, REJECTED = 4, REPLACE_IGNORED = 5,
 };

@@ -131,6 +131,11 @@ TEST(OuchResponder, ReplacedNamesBothUserRefNumsAndRetiresTheOriginal) {
     OrderRecord replacement = MakeRecord(3, 8);
     replacement.price = 1'501'000;
     replacement.cl_ord_id = wire::alpha<14>("REPLACED");
+    // What OrderEntry can't know: the original's, filled in on REPLACED.
+    replacement.side = 0;
+    replacement.symbol = {};
+    replacement.capacity = 0;
+    replacement.cross_type = 0;
     responder.on_note(Replacing(43, replacement), kTimestamp);
 
     EngineEvent replaced = Event(EngineEventType::REPLACED, 43, 15'010, 400);
@@ -146,6 +151,10 @@ TEST(OuchResponder, ReplacedNamesBothUserRefNumsAndRetiresTheOriginal) {
     EXPECT_EQ(r.price, 1'501'000u);
     EXPECT_EQ(r.order_reference_number, 43u);
     EXPECT_EQ(r.cl_ord_id, wire::alpha<14>("REPLACED"));
+    EXPECT_EQ(r.side, 'B');                       // inherited
+    EXPECT_EQ(r.symbol, wire::alpha<8>("AAPL"));  // inherited
+    EXPECT_EQ(r.capacity, 'A');                   // inherited
+    EXPECT_EQ(r.cross_type, 'N');                 // inherited
 
     EXPECT_EQ(responder.live_orders(), 1u);
     EXPECT_FALSE(responder.on_event(Event(EngineEventType::CANCELED, 42, 15'025, 1, 'U'), kTimestamp));
