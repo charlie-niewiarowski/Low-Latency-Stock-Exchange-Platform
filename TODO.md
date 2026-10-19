@@ -42,9 +42,10 @@ lost, its resting orders are canceled (best effort; a Logout Request doesn't tri
 
 ## 3. Outbound-thread performance pass
 
-At saturation the outbound thread is now the bottleneck. In a closed-loop run, "engine
-push → server pop" is ~200 µs at p50: replies queue in the engine's outbound ring while
-the outbound thread works through the previous batch. Places to look:
+At saturation the outbound thread is still the bottleneck. In a closed-loop run as root
+(2.05M req/s), "engine push → server pop" is ~69 µs at p50, the largest stage: replies
+queue in the engine's outbound ring while the outbound thread works through the previous
+batch. Places to look:
 
 - `tcp_sender::send()` per connection per flush: segment building, software TCP checksums
 - the inbound side's software checksum verification (`tcp_params::verify_checksums`). On
@@ -57,8 +58,11 @@ the outbound thread works through the previous batch. Places to look:
   (`REPLACE_IGNORED`), and the engine finds orders by (ClientId, ClientOrderRef), so
   `OrderEntry` keeps no per-order map. Together 871k -> 1.10M req/s as root, RSS flat at
   ~440 MB (was 2.8 GB after 20 s and growing), inbound p50 13 -> 6 µs
-- the responder's OrderId -> record map (~22% of the outbound thread): events could
-  echo `client_ref`, leaving only a short buffer of recent notes for the OUCH-only fields
+- done: the default build type is Release (dependencies were at -O0 without NDEBUG):
+  1.10M -> 2.05M req/s as root, e2e p50 298 -> 132 µs. Numbers above this line were
+  measured on the unoptimized build
+- the responder is ~12% of the outbound thread, mostly zeroing each 152-byte
+  `OuchOutboundFrame` (`.ouch = {}`), not the map; the kernel's tap write is ~half
 - then `stage_breakdown` again, run as root so `SCHED_FIFO` and core pinning are in effect
 
 ## 4. DPDK in the Docker image
