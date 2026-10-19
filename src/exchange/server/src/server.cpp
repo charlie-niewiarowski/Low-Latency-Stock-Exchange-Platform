@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <string>
@@ -51,6 +53,33 @@ void unpin_this_thread() {
 }
 #endif
 
+// Every frame we write into the tap is, to the kernel, one arriving on
+// iface, and tun hands it to the stack right there in the writing thread:
+// IP and TCP receive for the client's socket and the client's wakeup all run
+// inside our write() call, on a gateway core. RPS makes the kernel queue the
+// frame to core's backlog instead and process it there, as a real receiving
+// host's NIC interrupt would. Each of our tx queues writes into its own
+// kernel rx queue (rx-N), so it's set on all of them.
+void steer_kernel_receive(const std::string &iface, const int core) {
+    if (core < 0) return;
+    const std::filesystem::path queues = "/sys/class/net/" + iface + "/queues";
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator(queues, ec)) {
+        if (!entry.path().filename().string().starts_with("rx-")) continue;
+        std::ofstream rps(entry.path() / "rps_cpus");
+        rps << std::hex << (uint64_t{1} << core) << std::flush;
+        if (!rps) {
+            std::cerr << "warning: couldn't set " << (entry.path() / "rps_cpus").string()
+                      << " (needs root); the kernel's receive path stays on the gateway threads" << std::endl;
+            return;
+        }
+    }
+    if (ec) {
+        std::cerr << "warning: couldn't list " << queues.string() << " (" << ec.message()
+                  << "); the kernel's receive path stays on the gateway threads" << std::endl;
+    }
+}
+
 dpdk::port &bring_up_port(dpdk::runtime &runtime, const ServerNetwork &network) {
     dpdk::port &port = runtime.add_port(/*port_id=*/0, network.rx_queues, network.tx_queues);
     if (network.tap) {
@@ -65,6 +94,7 @@ dpdk::port &bring_up_port(dpdk::runtime &runtime, const ServerNetwork &network) 
             std::cerr << "warning: steer_rx_to_queue failed (" << e.what() << "); expect reordering" << std::endl;
         }
         dpdk::configure_kernel_interface(network.tap->iface, network.tap->kernel_ipv4, network.tap->prefix_len);
+        steer_kernel_receive(network.tap->iface, network.tap->rps_core);
     }
     port.set_ipv4_address(network.ipv4);
     return port;
@@ -110,7 +140,12 @@ ServerNetwork ServerNetwork::tap_interface(std::string iface) {
         .data_tx = 1,
         .ipv4 = SERVER_IPV4(EXCHANGE_IPV4),
         .listen_port = EXCHANGE_PORT,
-        .tap = Tap{.iface = std::move(iface), .kernel_ipv4 = SERVER_IPV4(EXCHANGE_KERNEL_IPV4), .prefix_len = 24},
+        .tap = Tap{
+            .iface = std::move(iface),
+            .kernel_ipv4 = SERVER_IPV4(EXCHANGE_KERNEL_IPV4),
+            .prefix_len = 24,
+            .rps_core = TAP_RPS_CORE,
+        },
     };
 }
 

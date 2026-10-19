@@ -156,6 +156,7 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | `EXCHANGE_KERNEL_IPV4` | `10, 77, 0, 1` | The kernel side's address (`/24`) |
 | `EXCHANGE_IPV4` | `10, 77, 0, 2` | The exchange's address |
 | `EXCHANGE_PORT` | `4000` | Port the exchange listens on |
+| `TAP_RPS_CORE` | `5` | Tap only: core the kernel processes the exchange's outgoing segments on (RPS), instead of inline in the gateway thread's write. `-1` disables. Needs root; skipped with a warning otherwise |
 | `SOUP_SESSION` | `"SIM"` | SoupBinTCP session clients log into (any username/password is accepted) |
 | `MAX_CLIENTS` | `64` | Usernames (sessions) accepted in a day; logins for new ones beyond this are rejected |
 | `SOUP_REPLAY_BYTES` | `16 MiB` | Sequenced Data each session keeps for re-login replay (power of two), allocated on its first login. Also its send buffer, so a connected client this far behind is disconnected |

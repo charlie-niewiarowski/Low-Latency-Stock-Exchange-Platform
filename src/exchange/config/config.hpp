@@ -48,6 +48,13 @@
 #define EXCHANGE_KERNEL_IPV4 10, 77, 0, 1 // RTE_IPV4 arguments
 #define EXCHANGE_IPV4 10, 77, 0, 2
 #define EXCHANGE_PORT 4000
+// Tap only: the core the kernel runs its receive path on for what the
+// exchange sends (RPS on EXCHANGE_TAP_IFACE). A write into the tap otherwise
+// runs the client's whole IP/TCP receive inline on the gateway thread that
+// wrote it; on real hardware that work is the receiving host's. A spare
+// core, not a gateway's or the client's (CLIENT_CORE 4). -1 leaves it
+// inline. Needs root; skipped with a warning otherwise.
+#define TAP_RPS_CORE 5
 
 //=============================================================================
 // development macros (DO NOT TOUCH UNLESS FOR A REASON)

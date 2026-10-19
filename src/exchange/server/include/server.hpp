@@ -67,6 +67,7 @@ struct ServerNetwork {
         std::string iface;       // the kernel-side interface the tap PMD creates
         uint32_t    kernel_ipv4; // its address, host order
         uint8_t     prefix_len;
+        int         rps_core = -1; // where the kernel processes what we send (see TAP_RPS_CORE); -1: inline
     };
 
     dpdk::runtime_params  eal;
