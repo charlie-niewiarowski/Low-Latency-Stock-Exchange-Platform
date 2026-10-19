@@ -75,6 +75,31 @@ target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map hd
 # DPDK's runtime files: serialize everything that brings one up.
 gtest_discover_tests(server-tests PROPERTIES RESOURCE_LOCK dpdk_eal)
 
+# ── exchange over tap ───────────────────────────────────────────────────────
+# Server on a net_tap port plus the real Engine, against kernel sockets in the
+# test process. Needs CAP_NET_ADMIN to create the tap interface; without it the
+# binary exits 77, which ctest reports as skipped. One ctest entry for the
+# binary, not one per case: each case would otherwise bring up its own EAL and
+# tap device. Run it alone with `ctest -L privileged`, under sudo or
+# `unshare -rnm` (see tap_e2e_test.cpp).
+
+add_executable(server-tap-tests
+        tap_e2e_test.cpp
+        ${EXCHANGE_SRC}/server/src/server.cpp
+        ${EXCHANGE_SRC}/server/src/order_entry.cpp
+        ${EXCHANGE_SRC}/server/src/ouch_responder.cpp
+        ${EXCHANGE_SRC}/engine/src/engine.cpp
+        ${EXCHANGE_SRC}/engine/src/orderbook.cpp
+)
+target_include_directories(server-tap-tests PRIVATE ${SERVER_TEST_INCLUDES} ${EXCHANGE_SRC}/engine/include)
+target_compile_definitions(server-tap-tests PRIVATE TESTING=1)
+target_link_libraries(server-tap-tests PRIVATE infra dpdk_lib absl::flat_hash_map hdr_histogram_static GTest::gtest)
+add_test(NAME server-tap-tests COMMAND server-tap-tests)
+set_tests_properties(server-tap-tests PROPERTIES
+        LABELS privileged
+        SKIP_RETURN_CODE 77
+        RESOURCE_LOCK dpdk_eal)
+
 # ── proto ────────────────────────────────────────────────────────────────────
 # Pure OUCH/ITCH wire codecs (ouch_proto.hpp/itch_proto.hpp, header-only in
 # src/infra) -- no DPDK, no config, so nothing beyond infra + gtest.
