@@ -47,24 +47,25 @@ std::optional<OuchResponse> OuchResponder::on_event(const EngineEvent &event, co
     OuchResponse response{.client_id = r.client_id, .ouch = {}};
     switch (event.type) {
         case EngineEventType::ACCEPTED:
+        {
             order.open = event.quantity;
-            response.ouch.order_accepted = OuchOrderAccepted{
-                .timestamp                     = timestamp,
-                .user_ref_num                  = r.user_ref_num,
-                .side                          = r.side,
-                .quantity                      = event.quantity,
-                .symbol                        = r.symbol,
-                .price                         = r.price,
-                .time_in_force                 = r.time_in_force,
-                .display                       = r.display,
-                .order_reference_number        = event.order_id,
-                .capacity                      = r.capacity,
-                .intermarket_sweep_eligibility = r.intermarket_sweep_eligibility,
-                .cross_type                    = r.cross_type,
-                .order_state                   = 'L',
-                .cl_ord_id                     = r.cl_ord_id,
-            };
+            OuchOrderAccepted &a = response.ouch.order_accepted = accepted_defaults_;
+            a.timestamp                     = timestamp;
+            a.user_ref_num                  = r.user_ref_num;
+            a.side                          = r.side;
+            a.quantity                      = event.quantity;
+            a.symbol                        = r.symbol;
+            a.price                         = r.price;
+            a.time_in_force                 = r.time_in_force;
+            a.display                       = r.display;
+            a.order_reference_number        = event.order_id;
+            a.capacity                      = r.capacity;
+            a.intermarket_sweep_eligibility = r.intermarket_sweep_eligibility;
+            a.cross_type                    = r.cross_type;
+            a.order_state                   = 'L';
+            a.cl_ord_id                     = r.cl_ord_id;
             return response;
+        }
 
         case EngineEventType::REPLACED: {
             // Order Replaced names the original by its UserRefNum, and the
@@ -83,23 +84,22 @@ std::optional<OuchResponse> OuchResponder::on_event(const EngineEvent &event, co
             orders_.erase(orig); // doesn't invalidate it/order/r (a different element)
 
             order.open = event.quantity;
-            response.ouch.order_replaced = OuchOrderReplaced{
-                .timestamp                     = timestamp,
-                .orig_user_ref_num             = orig_user_ref_num,
-                .user_ref_num                  = r.user_ref_num,
-                .side                          = r.side,
-                .quantity                      = event.quantity,
-                .symbol                        = r.symbol,
-                .price                         = r.price,
-                .time_in_force                 = r.time_in_force,
-                .display                       = r.display,
-                .order_reference_number        = event.order_id,
-                .capacity                      = r.capacity,
-                .intermarket_sweep_eligibility = r.intermarket_sweep_eligibility,
-                .cross_type                    = r.cross_type,
-                .order_state                   = 'L',
-                .cl_ord_id                     = r.cl_ord_id,
-            };
+            OuchOrderReplaced &u = response.ouch.order_replaced = replaced_defaults_;
+            u.timestamp                     = timestamp;
+            u.orig_user_ref_num             = orig_user_ref_num;
+            u.user_ref_num                  = r.user_ref_num;
+            u.side                          = r.side;
+            u.quantity                      = event.quantity;
+            u.symbol                        = r.symbol;
+            u.price                         = r.price;
+            u.time_in_force                 = r.time_in_force;
+            u.display                       = r.display;
+            u.order_reference_number        = event.order_id;
+            u.capacity                      = r.capacity;
+            u.intermarket_sweep_eligibility = r.intermarket_sweep_eligibility;
+            u.cross_type                    = r.cross_type;
+            u.order_state                   = 'L';
+            u.cl_ord_id                     = r.cl_ord_id;
             return response;
         }
 

@@ -61,6 +61,14 @@ private:
     void reduce_(absl::flat_hash_map<OrderId, LiveOrder>::iterator order, Quantity shares);
 
     absl::flat_hash_map<OrderId, LiveOrder> orders_;
+
+    // What Accepted and Replaced start from: every optional field at its
+    // default (the gateway never sets a tag), the core fields then filled in.
+    // Members rather than constants on purpose: a designated initializer, or
+    // a copy of a constant the compiler can see is mostly zeros, becomes a
+    // value-initialized ~150-byte `rep stos`, slow to start for its size.
+    OuchOrderAccepted accepted_defaults_{};
+    OuchOrderReplaced replaced_defaults_{};
 };
 
 #endif // OUCH_RESPONDER_H

@@ -578,6 +578,7 @@ size_t encoded_size(const M &msg) noexcept {
     wire::WireSizer sizer;
     M::core(msg, sizer);
     size_t size = sizer.size() + kAppendageLengthLen;
+    if (msg.appendage.empty()) return size; // the usual case; saves walking every tag
     M::tags(msg, [&](OuchTag tag, const auto &field) {
         if (msg.appendage.has(tag)) size += kTagValueHeaderLen + sizeof(field);
     });
@@ -591,13 +592,15 @@ size_t encode(const M &msg, std::span<std::byte> out) noexcept {
 
     std::byte *appendage_length = writer.skip(kAppendageLengthLen);
     const size_t appendage_begin = writer.written();
-    M::tags(msg, [&](OuchTag tag, const auto &field) {
-        if (!msg.appendage.has(tag)) return;
-        // TagValue Length counts what follows it: the OptionTag byte plus the value.
-        writer(static_cast<uint8_t>(1 + sizeof(field)));
-        writer(tag);
-        writer(field);
-    });
+    if (!msg.appendage.empty()) { // the usual case is none; saves walking every tag
+        M::tags(msg, [&](OuchTag tag, const auto &field) {
+            if (!msg.appendage.has(tag)) return;
+            // TagValue Length counts what follows it: the OptionTag byte plus the value.
+            writer(static_cast<uint8_t>(1 + sizeof(field)));
+            writer(tag);
+            writer(field);
+        });
+    }
 
     if (!writer.ok()) return 0;
     wire::WireWriter::store(appendage_length, static_cast<uint16_t>(writer.written() - appendage_begin));
