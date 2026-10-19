@@ -153,6 +153,15 @@ TEST(OuchResponder, ReplacedNamesBothUserRefNumsAndRetiresTheOriginal) {
     EXPECT_EQ(responder.live_orders(), 0u);
 }
 
+TEST(OuchResponder, IgnoredReplaceRetiresTheReplacementSilently) {
+    OuchResponder responder;
+    responder.on_note(Replacing(43, MakeRecord(3, 8)), kTimestamp); // its original is already dead
+    EXPECT_EQ(responder.live_orders(), 1u);
+
+    EXPECT_FALSE(responder.on_event(Event(EngineEventType::REPLACE_IGNORED, 43, 0, 0), kTimestamp));
+    EXPECT_EQ(responder.live_orders(), 0u);
+}
+
 TEST(OuchResponder, MarketOrderAcceptedThenRemainderCanceled) {
     OuchResponder responder;
     OrderRecord market = MakeRecord(3, 7);

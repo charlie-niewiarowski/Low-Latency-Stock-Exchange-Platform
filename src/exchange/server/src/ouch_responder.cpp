@@ -128,6 +128,10 @@ std::optional<OuchResponse> OuchResponder::on_event(const EngineEvent &event, co
             };
             orders_.erase(it);
             return response;
+
+        case EngineEventType::REPLACE_IGNORED:
+            orders_.erase(it); // the replacement's record, from its note; the client hears nothing
+            return std::nullopt;
     }
     return std::nullopt; // defensive: only reachable via an out-of-range enum value
 }

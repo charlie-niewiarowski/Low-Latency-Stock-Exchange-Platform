@@ -153,7 +153,14 @@ bool Orderbook::cancel(const Context& ctx) {
 bool Orderbook::replace(const Context& ctx) {
     const EngineRequest& req = ctx.req;
     const auto it = orders_.find(req.order_id);
-    if (it == orders_.end() || it->second->client_id_ != req.client_id) return false;
+    if (it == orders_.end() || it->second->client_id_ != req.client_id) {
+        // Silently ignored, as far as the client is concerned.
+        emit(ctx, {.order_id = req.new_order_id, .client_id = req.client_id,
+                   .type = EngineEventType::REPLACE_IGNORED});
+        return false;
+    }
+    // A duplicate id (a gateway bug): the live order owns that id's record, so
+    // no REPLACE_IGNORED either.
     if (orders_.contains(req.new_order_id)) return false;
 
     Order* orig = it->second;
@@ -172,6 +179,8 @@ bool Orderbook::replace(const Context& ctx) {
         emit(ctx, {.order_id = orig_id, .client_id = orig->client_id_, .price = orig->price_,
                    .quantity = orig->open_quantity_, .type = EngineEventType::CANCELED,
                    .reason = engine_reason::kUserRequested});
+        emit(ctx, {.order_id = req.new_order_id, .client_id = req.client_id,
+                   .type = EngineEventType::REPLACE_IGNORED}); // the replacement never exists
         unlink(orig);
         release(orig);
         publish(itch);

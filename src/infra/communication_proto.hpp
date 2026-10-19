@@ -56,8 +56,14 @@ static_assert(sizeof(EngineRequest) == 56);
 // per fill, then CANCELED for an IOC remainder), and the counterparty of
 // each fill gets its own EXECUTED; the first one is flagged answers_request.
 // Requests the Nasdaq spec says to ignore silently (cancel of a dead order,
-// replace of a dead order) produce none.
-enum class EngineEventType : uint8_t { ACCEPTED = 0, REPLACED = 1, CANCELED = 2, EXECUTED = 3, REJECTED = 4 };
+// replace of a dead order) produce no client-visible event -- except that a
+// replace that doesn't go ahead produces REPLACE_IGNORED for its replacement
+// (order_id = the replacement's id): the gateway already holds that order's
+// record from its note, and this is how it learns to drop it. No OUCH message
+// is sent for it.
+enum class EngineEventType : uint8_t {
+    ACCEPTED = 0, REPLACED = 1, CANCELED = 2, EXECUTED = 3, REJECTED = 4, REPLACE_IGNORED = 5,
+};
 
 // EngineEvent::reason values.
 namespace engine_reason {

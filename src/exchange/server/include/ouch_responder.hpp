@@ -11,7 +11,8 @@
 //
 // A record lives from its note until the engine reports the order dead --
 // fully executed, canceled to zero, replaced, or rejected -- which it tracks
-// by following the open share count the events imply.
+// by following the open share count the events imply. A replacement that
+// never comes to be (its replace was ignored) is retired by REPLACE_IGNORED.
 //
 
 #ifndef OUCH_RESPONDER_H

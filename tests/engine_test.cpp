@@ -318,8 +318,11 @@ TEST_F(OrderbookTest, ReplaceAtOrBelowExecutedSharesCancels) {
     ASSERT_TRUE(Send(Replace(1, 3, kAlice, 1000, 50)));
 
     const auto events = Events();
-    ASSERT_EQ(events.size(), 1u);
+    ASSERT_EQ(events.size(), 2u);
     ExpectEvent(events[0], EngineEventType::CANCELED, 1, kAlice, 1000, 40);
+    EXPECT_EQ(events[1].type, EngineEventType::REPLACE_IGNORED); // the replacement never exists
+    EXPECT_EQ(events[1].order_id, 3u);
+    EXPECT_FALSE(events[1].answers_request);
     EXPECT_EQ(Itch().at(0).header.message_type, ItchMessageType::ORDER_DELETE);
     EXPECT_EQ(book_->order_count(), 0u);
 }
@@ -368,7 +371,16 @@ TEST_F(OrderbookTest, IgnoredReplaces) {
     EXPECT_FALSE(Send(Replace(9, 3, kAlice, 990, 100))); // unknown / dead original
     EXPECT_FALSE(Send(Replace(1, 3, kBob, 990, 100)));   // not Bob's order
     EXPECT_FALSE(Send(Replace(1, 2, kAlice, 990, 100))); // replacement id already live
-    EXPECT_TRUE(Events().empty());
+
+    // Nothing the client sees -- but the first two tell the gateway to drop
+    // the replacement's record. The third's id belongs to a live order.
+    const auto events = Events();
+    ASSERT_EQ(events.size(), 2u);
+    for (const EngineEvent &event : events) {
+        EXPECT_EQ(event.type, EngineEventType::REPLACE_IGNORED);
+        EXPECT_EQ(event.order_id, 3u);
+    }
+    EXPECT_TRUE(Itch().empty());
     EXPECT_TRUE(book_->has_order(1));
 }
 
