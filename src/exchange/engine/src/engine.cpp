@@ -21,13 +21,10 @@ Engine::Engine(InboundRing& in_ring, OutboundRing& out_ring, MarketDataRing& mar
 //=============================================================================
 void Engine::run() {
     matching_thread_ = std::jthread([&]() {
-        #if DIAGNOSTICS
-        std::cerr << "matching tid: " << gettid() << std::endl;
-        #endif
-
         pin_to_core(MATCHING_CORE);
         handleMatching();
     });
+    name_thread(matching_thread_.native_handle(), "matching");
 }
 
 //=============================================================================

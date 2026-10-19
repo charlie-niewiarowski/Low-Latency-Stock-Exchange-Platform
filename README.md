@@ -140,7 +140,7 @@ All compile-time configuration lives in header files. A rebuild is required afte
 
 | Macro | Default | Description |
 |---|---|---|
-| `DIAGNOSTICS` | `1` | Print thread ids at startup, and per-stage latency histograms at shutdown (the end-to-end histogram is always printed) |
+| `DIAGNOSTICS` | `1` | Print per-stage latency histograms at shutdown (the end-to-end histogram is always printed). Every thread's tid and name is printed at startup either way |
 | `TESTING` | `0` | Expose `Engine`/`Orderbook` inspection accessors and `Server` internals to tests, and leave threads unpinned (overridden to `1` for `engine-tests`, `server-tests`, `server-tap-tests` and `orderbook-bench`) |
 | `PREFETCH` | `1` | Software prefetch hints on the matching hot path; set `0` to compile them out |
 | `MIN_PRICE` | `1` | Lowest price the book holds, in cents (its tick); OUCH prices outside the band, or sub-penny, are rejected |

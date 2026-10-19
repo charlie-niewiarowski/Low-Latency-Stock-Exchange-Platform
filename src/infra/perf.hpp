@@ -5,10 +5,18 @@
 #ifndef INFRA_PERF_H
 #define INFRA_PERF_H
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
+#include <utility>
+#include <vector>
 #include <pthread.h>
 #include <sched.h>
+#include <unistd.h>
 #include <bits/cpu-set.h>
 
 //=============================================================================
@@ -52,6 +60,39 @@ inline void pin_to_core(const int core) {
                    << " (needs CAP_SYS_NICE or a raised RLIMIT_RTPRIO; falling back to SCHED_OTHER)"
                    << std::endl;
     }
+}
+
+//=============================================================================
+// thread names and ids (for perf, top -H, gdb)
+//=============================================================================
+
+// Names a thread (what perf's comm column, top -H and gdb show). Linux keeps
+// at most 15 characters. Called by whoever creates the thread, so the name
+// is in place before anyone lists threads.
+inline void name_thread(const pthread_t thread, const char *name) {
+    if (const int rc = pthread_setname_np(thread, name); rc != 0) {
+        std::cerr << "pthread_setname_np(" << name << ") failed: " << strerror(rc) << std::endl;
+    }
+}
+
+// Every thread in this process -- including ones libraries started, like
+// DPDK's interrupt and telemetry threads -- with its tid and name, e.g. for
+// `perf record -t <tid>` or `perf top -t <tid>`.
+inline void print_threads(std::ostream &os) {
+    std::vector<std::pair<long, std::string>> threads;
+    std::error_code ec;
+    for (const auto &task : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        std::string name;
+        std::getline(std::ifstream(task.path() / "comm"), name);
+        threads.emplace_back(std::strtol(task.path().filename().c_str(), nullptr, 10), std::move(name));
+    }
+    std::sort(threads.begin(), threads.end());
+
+    os << "threads (pid " << getpid() << "):\n";
+    for (const auto &[tid, name] : threads) {
+        os << "  " << tid << "  " << name << "\n";
+    }
+    os << std::flush;
 }
 
 #endif //INFRA_PERF_H

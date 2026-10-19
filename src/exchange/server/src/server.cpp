@@ -184,6 +184,7 @@ void Server::run() {
 #endif
         inbound_();
     });
+    name_thread(inbound_thread_.native_handle(), "gw-inbound");
     outbound_thread_ = std::jthread([this] {
 #if TESTING
         unpin_this_thread();
@@ -192,6 +193,7 @@ void Server::run() {
 #endif
         outbound_();
     });
+    name_thread(outbound_thread_.native_handle(), "gw-outbound");
 }
 
 void Server::stop() {

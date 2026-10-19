@@ -3,6 +3,7 @@
 //
 
 #include "exchange.hpp"
+#include "perf.hpp"
 
 #include <thread>
 #include <pthread.h>
@@ -19,6 +20,8 @@ Exchange::Exchange() : engine_(*in_ring_, *out_ring_, market_data_ring_, stop_),
 void Exchange::run() {
     server_.run();
     engine_.run();
+    // Every thread is up and named by now: list them all, for perf -t.
+    print_threads(std::cerr);
 
     stop_.wait(false);
     server_.stop(); // the engine's matching thread watches stop_ itself

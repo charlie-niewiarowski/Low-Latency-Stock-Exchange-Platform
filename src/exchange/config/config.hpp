@@ -9,8 +9,9 @@
 // user-level macros (feel free to tinker around)
 //=============================================================================
 
-#define DIAGNOSTICS 1 // print thread ids at startup, and per-stage latency histograms
-                      // (latency.hpp) at shutdown on top of the always-on end-to-end one
+#define DIAGNOSTICS 1 // per-stage latency histograms (latency.hpp) at shutdown, on top of
+                      // the always-on end-to-end one. (Every thread's tid and name is
+                      // printed at startup either way.)
 
 #ifndef TESTING
 #define TESTING 0 // overridable at compile time (see tests/CMakeLists.txt), so the
