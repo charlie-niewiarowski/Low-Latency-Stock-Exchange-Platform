@@ -17,11 +17,14 @@ FetchContent_Declare(
         GIT_REPOSITORY https://github.com/HdrHistogram/HdrHistogram_c.git
         GIT_TAG 0.11.9
 )
+# Pinned: the server is built on its tcp_stack (passive-open TCP termination)
+# and tap helpers. Its own gtest suite stays out of this build.
 FetchContent_Declare(
         dpdk_lib
         GIT_REPOSITORY https://github.com/charlie-niewiarowski/dpdk-wrapper-library
-        GIT_TAG main
+        GIT_TAG a4d01b4332b40231a00668e18539467bb134ac97
 )
+set(DPDK_LIB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(hdr_histogram dpdk_lib)
 
 # Only absl::flat_hash_map is actually linked below; EXCLUDE_FROM_ALL keeps

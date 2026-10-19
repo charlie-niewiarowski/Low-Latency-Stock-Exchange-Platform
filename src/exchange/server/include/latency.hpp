@@ -36,8 +36,10 @@
 //                which goes out before matching -- so t3 -> t4 is time to
 //                acknowledge, not the whole match)
 //   t5  outbound: event popped
-//   t6  outbound: tx burst holding the reply begins
-//   t7  outbound: that tx burst has been fully handed to the NIC
+//   t6  outbound: the send that finishes putting the reply's packet on the
+//                wire begins (a reply waits in its session's log while the
+//                client's TCP window is full, so t5 -> t6 includes that)
+//   t7  outbound: that send has handed the packet's last bytes to the NIC
 //
 // Recorded straight into HDR histograms as replies go out (no sample buffer,
 // so a run of any length is fully covered at fixed memory), after skipping

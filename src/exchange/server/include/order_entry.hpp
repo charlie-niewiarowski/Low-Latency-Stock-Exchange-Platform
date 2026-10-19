@@ -50,22 +50,18 @@ struct OrderRecord {
 // order's record (and every reject the gateway answers itself) travels to it
 // on its own SPSC ring. A note is always pushed before the request it
 // belongs to, so it's already visible by the time the engine's resulting
-// event reaches the outbound thread. Session events (SoupBinTCP login and
-// logout, which only Server produces) ride the same ring so they stay in
-// order with the client's OUCH traffic.
+// event reaches the outbound thread. (Server wraps these in its own note
+// type, alongside SoupBinTCP session events, so they stay in order with
+// the session's logins.)
 struct GatewayNote {
     enum class Kind : uint8_t {
         ORDER_ENTERED,    // order_id is a new order; record is what to echo on ACCEPTED
         ORDER_REPLACING,  // order_id is a replacement; record is what to echo on REPLACED
         REJECTED,         // gateway-level reject; record identifies the rejected message
-        // Session events: only record.client_id is meaningful.
-        LOGIN_ACCEPTED,
-        LOGIN_REJECTED,   // reject_reason holds a soup_reject code
-        LOGGED_OUT,
     };
 
     Kind        kind;
-    uint16_t    reject_reason; // REJECTED: an ouch_reject code; LOGIN_REJECTED: a soup_reject code
+    uint16_t    reject_reason; // REJECTED: an ouch_reject code
     OrderId     order_id;      // unused for REJECTED
     OrderRecord record;
 };

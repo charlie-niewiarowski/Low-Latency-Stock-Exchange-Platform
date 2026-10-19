@@ -62,9 +62,14 @@ set(SERVER_TEST_INCLUDES
 
 add_executable(server-tests ${SERVER_TEST_SOURCES})
 target_include_directories(server-tests PRIVATE ${SERVER_TEST_INCLUDES})
-# TESTING=1 switches Server's EAL bring-up (server.cpp) to a software-only
-# vdev instead of assuming a real hugepage-backed, PCI-bound NIC.
-target_compile_definitions(server-tests PRIVATE TESTING=1)
+# TESTING=1 opens up Server to the test fixture and leaves its threads
+# unpinned. The SoupBinTCP limits shrink so replay-log overflow and the
+# login/idle timeouts can be exercised in a test's time.
+target_compile_definitions(server-tests PRIVATE
+        TESTING=1
+        SOUP_REPLAY_BYTES=4096
+        SOUP_IDLE_TIMEOUT_MS=2000
+        SOUP_LOGIN_TIMEOUT_MS=2000)
 target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map hdr_histogram_static GTest::gtest_main)
 # Each discovered test is its own process, and two EALs at once collide on
 # DPDK's runtime files: serialize everything that brings one up.
@@ -85,12 +90,13 @@ gtest_discover_tests(clock-tests)
 
 # ── gateway ──────────────────────────────────────────────────────────────────
 # The server's protocol halves -- OrderEntry (OUCH -> engine), OuchResponder
-# (engine -> OUCH) and validation.hpp -- have no DPDK dependency, so they're
+# (engine -> OUCH), SessionLog (replay) and validation.hpp -- have no DPDK dependency, so they're
 # tested without bringing up an EAL.
 
 add_executable(gateway-tests
         order_entry_tests.cpp
         ouch_responder_tests.cpp
+        session_log_tests.cpp
         ${EXCHANGE_SRC}/server/src/order_entry.cpp
         ${EXCHANGE_SRC}/server/src/ouch_responder.cpp
 )

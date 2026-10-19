@@ -28,11 +28,6 @@ std::optional<OuchResponse> OuchResponder::on_note(const GatewayNote &note, cons
             };
             return response;
         }
-
-        case GatewayNote::Kind::LOGIN_ACCEPTED:
-        case GatewayNote::Kind::LOGIN_REJECTED:
-        case GatewayNote::Kind::LOGGED_OUT:
-            return std::nullopt; // session-layer, not OUCH: Server answers these
     }
     return std::nullopt; // defensive: only reachable via an out-of-range enum value
 }
