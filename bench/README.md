@@ -37,10 +37,15 @@ executable).
 `benchlib.get_runner()` picks how the binaries run:
 
 - **native** — used when on Linux x86-64 with the release binaries present. Runs
-  `build/exchange/exchange-release` and `build/client/client-release` directly.
+  `build/exchange/exchange-release` and `build/client/client-release` directly,
+  from one shell. The exchange creates its own tap interface (`dpdktap0`,
+  `10.77.0.1` <-> `10.77.0.2`), which needs `CAP_NET_ADMIN`: as root the pair runs
+  in the host's network namespace, otherwise inside `unshare -rnm`, where
+  `SCHED_FIFO` isn't permitted (run as root for representative tails).
   This is the only backend that yields **real latency** numbers.
 - **docker** — the fallback (e.g. macOS). Drives both binaries inside one
-  `docker compose run --rm dev` shell over loopback. On non-x86 hosts (Apple
+  `docker compose run --rm dev` shell. Not usable yet: the image doesn't install
+  DPDK, so the exchange doesn't build there (see `TODO.md`). On non-x86 hosts (Apple
   Silicon) the run is x86-64 **emulated**: throughput is still meaningful but
   latency figures are not authoritative, and every latency-bearing script prints a
   banner saying so.
