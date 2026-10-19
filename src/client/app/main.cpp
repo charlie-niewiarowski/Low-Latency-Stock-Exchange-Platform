@@ -142,7 +142,7 @@ int main(const int argc, char* argv[]) {
         static_cast<unsigned long long>(responses_err),
         static_cast<unsigned long long>(responses_canceled),
         static_cast<unsigned long long>(responses_replaced),
-        -1LL * static_cast<long long>(orders_in_flight),
+        static_cast<long long>(orders_in_flight),
         static_cast<double>(requests_sent)   * inv,
         static_cast<double>(responses_ack)   * inv,
         static_cast<double>(responses_match) * inv,
