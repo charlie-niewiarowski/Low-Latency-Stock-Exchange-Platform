@@ -67,7 +67,7 @@ target_link_libraries(exchange-debug PRIVATE infra config hdr_histogram_static d
 # compile (its constexpr function-pointer comparisons stop being constant
 # expressions), so those three checks are off; the rest of UBSan stays on.
 target_compile_options(exchange-debug PRIVATE
-        -O3 -g3 -fno-omit-frame-pointer
+        -O3 -g3 -fno-omit-frame-pointer -UNDEBUG
         -fsanitize=address,undefined
         -fno-sanitize=null,nonnull-attribute,returns-nonnull-attribute
         -march=native)

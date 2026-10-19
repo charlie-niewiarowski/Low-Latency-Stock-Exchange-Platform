@@ -20,7 +20,7 @@ add_executable(client-debug
 )
 
 target_compile_options(client-release PRIVATE -O3 -march=native)
-target_compile_options(client-debug PRIVATE -g -march=native)
+target_compile_options(client-debug PRIVATE -O0 -g -UNDEBUG -march=native)
 
 target_include_directories(client-release PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include   # order_factory.hpp, client_state.hpp

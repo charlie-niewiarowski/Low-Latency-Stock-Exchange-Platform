@@ -20,6 +20,9 @@ FetchContent_MakeAvailable(googletest)
 enable_testing()
 include(GoogleTest)
 
+# The tests keep assert() on under the default Release build type.
+add_compile_options(-UNDEBUG)
+
 # ── engine ───────────────────────────────────────────────────────────────────
 # Uses the TESTING-gated accessors on Engine/Orderbook (engine.hpp/orderbook.hpp),
 # so this target alone compiles with TESTING=1; exchange-release/debug stay
