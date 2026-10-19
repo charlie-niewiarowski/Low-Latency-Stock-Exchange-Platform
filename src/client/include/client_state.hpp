@@ -51,6 +51,11 @@ struct ClientState {
     // is never reset -- not even on reconnect.
     uint32_t next_user_ref_num = 1;
 
+    // SoupBinTCP sequence number of the next Sequenced Data packet expected.
+    // Kept across reconnects: a re-login asks for it, so the exchange replays
+    // whatever was missed while disconnected instead of everything since 1.
+    uint64_t next_sequence = 1;
+
     // Live-order ring: UserRefNums (and sides) from Accepted/Replaced, used as
     // CANCEL/REPLACE targets. Entries aren't removed when an order dies; a
     // stale target just gets silently ignored by the exchange.

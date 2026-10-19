@@ -2,12 +2,16 @@
 // Created by cniew on 9/11/26.
 //
 // End-to-end through a real Server over the TESTING net_ring0 vdev: the test
-// plays the client (SoupBinTCP-framed OUCH in on the spare tx queue, replies
-// out on the spare rx queue -- see Server's constructor) and the engine
-// (popping EngineRequests, pushing EngineEvents).
+// plays the client -- real TCP connections, scripted by tcp_peer.hpp,
+// carrying SoupBinTCP-framed OUCH -- and the engine (popping EngineRequests,
+// pushing EngineEvents).
+//
+// server-tests builds with small SoupBinTCP limits (see tests/CMakeLists.txt):
+// a 4 KiB replay log per session and 2 s login/idle timeouts.
 //
 
 #include "server.hpp"
+#include "tcp_peer.hpp"
 
 #include <immintrin.h>
 
@@ -16,24 +20,17 @@
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+using tcp_peer::SoupReply;
+using tcp_peer::TcpPeer;
+
 namespace {
 
-constexpr auto kTimeout = std::chrono::milliseconds(2000);
-
-PacketEndpoint MakeEndpoint(const std::array<uint8_t, 6> mac, const uint32_t ip) {
-    PacketEndpoint ep{};
-    std::memcpy(ep.mac.addr_bytes, mac.data(), mac.size());
-    ep.ip = ip;
-    return ep;
-}
-
-const PacketEndpoint kClient = MakeEndpoint({0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01}, 0xC0A80101); // 192.168.1.1
-const PacketEndpoint kServer = MakeEndpoint({0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03}, 0x0A000005); // 10.0.0.5
-constexpr uint16_t kServerPort = 4000;
+constexpr auto kTimeout = tcp_peer::kTimeout;
 
 OuchInboundFrame Enter(const uint32_t user_ref_num, const char side, const uint32_t quantity, const uint64_t price) {
     OuchInboundFrame frame{};
@@ -62,40 +59,59 @@ auto PollUntil(F &&poll, const std::chrono::milliseconds timeout = kTimeout) -> 
     return std::nullopt;
 }
 
+std::vector<std::byte> LoginBytes(const std::string_view username, const uint64_t sequence = 1,
+                                  const char *session = "") {
+    const SoupLoginRequest login{.username = wire::alpha<6>(username), .password = wire::alpha<10>("test"),
+                                 .requested_session = wire::alpha<10>(session),
+                                 .requested_sequence_number = sequence};
+    std::vector<std::byte> out(64);
+    out.resize(encode_soup_login_request(login, out));
+    return out;
+}
+
+std::vector<std::byte> DataBytes(const OuchInboundFrame &ouch) {
+    std::vector<std::byte> out(256);
+    out.resize(encode_soup_unsequenced(ouch, out));
+    return out;
+}
+
+std::vector<std::byte> EmptyBytes(const SoupPacketType type) {
+    std::vector<std::byte> out(kSoupHeaderLen);
+    encode_soup_empty(type, out);
+    return out;
+}
+
+OuchOutboundFrame Ouch(const SoupReply &reply) { return decode_outbound_ouch(reply.payload); }
+
+std::optional<SoupLoginAccepted> Accepted(const std::optional<SoupReply> &reply) {
+    if (!reply || reply->type != SoupPacketType::LOGIN_ACCEPTED) return std::nullopt;
+    return decode_soup_login_accepted(reply->payload);
+}
+
 } // namespace
 
 // The EAL can only be brought up once per process, so the whole suite shares
-// one Server. Each test talks from its own client port -- its own session,
-// with UserRefNums starting at 1 -- and reads OrderIds/ClientIds off the
-// requests rather than assuming them.
+// one Server. Each test connects from its own ports and logs in under its own
+// usernames -- its own sessions, with UserRefNums starting at 1 -- and reads
+// OrderIds/ClientIds off the requests rather than assuming them.
 class ServerTest : public testing::Test {
 protected:
-    // One SoupBinTCP packet from the server, copied out of its mbuf.
-    struct Reply {
-        PacketEndpoint         src;
-        PacketEndpoint         dst;
-        TCPHeader              transport;
-        SoupPacketType         type;
-        std::vector<std::byte> payload;
-
-        [[nodiscard]] OuchOutboundFrame ouch() const { return decode_outbound_ouch(payload); }
-    };
-
     static void SetUpTestSuite() {
         inbound_ring_ = std::make_shared<InboundRing>(RINGBUF_SIZE);
         outbound_ring_ = std::make_shared<OutboundRing>(RINGBUF_SIZE);
-        server_ = std::make_unique<Server>(inbound_ring_, outbound_ring_);
-        client_tx_queue_ = server_->test_client_tx_queue_;
-        client_rx_queue_ = server_->dpdk_port_.claim_rx_queue();
-        pool_ = server_->dpdk_port_.get_pool();
+        const ServerNetwork network = ServerNetwork::loopback_test();
+        server_ = std::make_unique<Server>(inbound_ring_, outbound_ring_, network);
+        dpdk::port &port = server_->dpdk_port_;
+        wire_ = std::make_unique<tcp_peer::Wire>(
+            port.claim_tx_queue(uint16_t{0}), port.claim_rx_queue(network.control_tx),
+            port.claim_rx_queue(network.data_tx), port.get_pool(), port.mac_address(), network.ipv4,
+            network.listen_port);
         server_->run();
     }
 
     static void TearDownTestSuite() {
         server_->stop();
-        client_rx_queue_.reset();
-        client_tx_queue_.reset();
-        pool_.reset();
+        wire_.reset();
         server_.reset();
         outbound_ring_.reset();
         inbound_ring_.reset();
@@ -105,67 +121,23 @@ protected:
     void SetUp() override {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         while (inbound_ring_->pop()) {}
-        while (client_rx_queue_->receive_burst().size() > 0) {}
+        wire_->drain();
     }
 
-    // One TCP segment from the client's (ip, client_port) to the server.
-    static bool SendSegment(const std::span<const std::byte> bytes, const uint16_t client_port) {
-        const TCPHeader tcp{.src_port = client_port, .dst_port = kServerPort, .flags = RTE_TCP_ACK_FLAG};
-        dpdk::packet pkt = packet_factory<TCPHeader, RawPayload>::build_packet(
-            *pool_, kClient, kServer, tcp, RawPayload{bytes});
-        std::array<dpdk::packet, 1> pkts{std::move(pkt)};
-        return client_tx_queue_->send_burst(pkts) == 1;
+    static TcpPeer Connect(const uint16_t port) {
+        TcpPeer peer(*wire_, port);
+        EXPECT_TRUE(peer.connect()) << "handshake from port " << port;
+        return peer;
     }
 
-    static std::vector<std::byte> LoginBytes(const char *session = "") {
-        const SoupLoginRequest login{.username = wire::alpha<6>("test"), .password = wire::alpha<10>("test"),
-                                     .requested_session = wire::alpha<10>(session),
-                                     .requested_sequence_number = 1};
-        std::vector<std::byte> out(64);
-        out.resize(encode_soup_login_request(login, out));
-        return out;
+    // Logs in as username; returns the Login Accepted.
+    static std::optional<SoupLoginAccepted> Login(TcpPeer &peer, const std::string_view username,
+                                                  const uint64_t sequence = 1) {
+        if (!peer.send(LoginBytes(username, sequence))) return std::nullopt;
+        return Accepted(peer.receive());
     }
 
-    static std::vector<std::byte> DataBytes(const OuchInboundFrame &ouch) {
-        std::vector<std::byte> out(256);
-        out.resize(encode_soup_unsequenced(ouch, out));
-        return out;
-    }
-
-    // Logs client_port in and returns the Login Accepted.
-    static std::optional<Reply> Login(const uint16_t client_port) {
-        if (!SendSegment(LoginBytes(), client_port)) return std::nullopt;
-        return Receive();
-    }
-
-    static bool Send(const OuchInboundFrame &ouch, const uint16_t client_port) {
-        return SendSegment(DataBytes(ouch), client_port);
-    }
-
-    static bool SendRaw(std::string_view payload) {
-        dpdk::packet pkt = pool_->get();
-        const auto *bytes = reinterpret_cast<const std::byte *>(payload.data());
-        if (!pkt || pkt.append(dpdk::packet::Payload(bytes, payload.size())) == nullptr) return false;
-        std::array<dpdk::packet, 1> pkts{std::move(pkt)};
-        return client_tx_queue_->send_burst(pkts) == 1;
-    }
-
-    // Next packet from the server; heartbeats are skipped unless asked for.
-    static std::optional<Reply> Receive(const bool skip_heartbeats = true,
-                                        const std::chrono::milliseconds timeout = kTimeout) {
-        return PollUntil([&]() -> std::optional<Reply> {
-            dpdk::packet_burst burst = client_rx_queue_->receive_burst(1);
-            for (const dpdk::packet &packet : burst) {
-                const auto raw = packet_factory<TCPHeader, RawPayload>::deserialize_packet(packet);
-                const SoupParseResult parsed = parse_soup_packet(raw.payload.bytes);
-                if (parsed.status != SoupParseStatus::PACKET) return std::nullopt;
-                if (skip_heartbeats && parsed.packet.type == SoupPacketType::SERVER_HEARTBEAT) return std::nullopt;
-                return Reply{raw.src, raw.dst, raw.transport, parsed.packet.type,
-                             {parsed.packet.payload.begin(), parsed.packet.payload.end()}};
-            }
-            return std::nullopt;
-        }, timeout);
-    }
+    static bool Send(TcpPeer &peer, const OuchInboundFrame &ouch) { return peer.send(DataBytes(ouch)); }
 
     // The test as the engine.
     static std::optional<EngineRequest> EngineReceive() {
@@ -174,23 +146,31 @@ protected:
 
     static void EngineSend(const EngineEvent &event) { ASSERT_TRUE(outbound_ring_->push(event)); }
 
+    static void Accept(const EngineRequest &request) {
+        EngineSend(EngineEvent{.order_id = request.order_id, .client_id = request.client_id, .price = request.price,
+                               .quantity = request.quantity, .type = EngineEventType::ACCEPTED});
+    }
+
+    static void Execute(const EngineRequest &request, const uint64_t match_number, const uint32_t quantity = 1) {
+        EngineSend(EngineEvent{.order_id = request.order_id, .match_number = match_number,
+                               .client_id = request.client_id, .price = request.price, .quantity = quantity,
+                               .type = EngineEventType::EXECUTED, .reason = engine_reason::kAddedLiquidity});
+    }
+
     static const LatencyHandler &Latency() { return server_->latency_; }
 
     static inline std::shared_ptr<InboundRing> inbound_ring_;
     static inline std::shared_ptr<OutboundRing> outbound_ring_;
     static inline std::unique_ptr<Server> server_;
-    static inline std::shared_ptr<dpdk::tx_queue> client_tx_queue_;
-    static inline std::shared_ptr<dpdk::rx_queue> client_rx_queue_;
-    static inline std::shared_ptr<dpdk::packet_pool> pool_;
+    static inline std::unique_ptr<tcp_peer::Wire> wire_;
 };
 
 TEST_F(ServerTest, DropsPacketsThatAreNotSoupBinTcp) {
-    ASSERT_TRUE(client_tx_queue_);
-    ASSERT_TRUE(SendRaw("some random bullshit"));
+    const std::string_view junk = "some random bullshit";
+    ASSERT_TRUE(wire_->inject_raw(std::as_bytes(std::span{junk})));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_FALSE(inbound_ring_->pop());
-    EXPECT_EQ(client_rx_queue_->receive_burst(1).size(), 0u);
 }
 
 //=============================================================================
@@ -198,78 +178,272 @@ TEST_F(ServerTest, DropsPacketsThatAreNotSoupBinTcp) {
 //=============================================================================
 
 TEST_F(ServerTest, LoginIsAcceptedIntoTheSimSession) {
-    const auto reply = Login(50001);
-    ASSERT_TRUE(reply);
-    ASSERT_EQ(reply->type, SoupPacketType::LOGIN_ACCEPTED);
-    const auto accepted = decode_soup_login_accepted(reply->payload);
+    TcpPeer peer = Connect(50001);
+    const auto accepted = Login(peer, "S50001");
     ASSERT_TRUE(accepted);
     EXPECT_EQ(accepted->session, soup_session_id(SOUP_SESSION));
     EXPECT_EQ(accepted->sequence_number, 1u);
 }
 
-TEST_F(ServerTest, LoginToAnotherSessionIsRejected) {
-    ASSERT_TRUE(SendSegment(LoginBytes("OTHER"), 50011));
+TEST_F(ServerTest, LoginToAnotherSessionIsRejectedAndClosed) {
+    TcpPeer peer = Connect(50011);
+    ASSERT_TRUE(peer.send(LoginBytes("S50011", 1, "OTHER")));
 
-    const auto reply = Receive();
+    const auto reply = peer.receive();
     ASSERT_TRUE(reply);
     ASSERT_EQ(reply->type, SoupPacketType::LOGIN_REJECTED);
     ASSERT_EQ(reply->payload.size(), 1u);
     EXPECT_EQ(static_cast<char>(reply->payload[0]), soup_reject::kSessionNotAvailable);
+    EXPECT_TRUE(peer.wait_closed()); // the server closes after Login Rejected
+}
+
+TEST_F(ServerTest, BlankUsernameIsNotAuthorized) {
+    TcpPeer peer = Connect(50012);
+    ASSERT_TRUE(peer.send(LoginBytes("")));
+
+    const auto reply = peer.receive();
+    ASSERT_TRUE(reply);
+    ASSERT_EQ(reply->type, SoupPacketType::LOGIN_REJECTED);
+    EXPECT_EQ(static_cast<char>(reply->payload[0]), soup_reject::kNotAuthorized);
 }
 
 TEST_F(ServerTest, DataBeforeLoginIsIgnored) {
-    ASSERT_TRUE(Send(Enter(1, 'B', 500, 1'502'500), 50021));
+    TcpPeer peer = Connect(50021);
+    ASSERT_TRUE(Send(peer, Enter(1, 'B', 500, 1'502'500)));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_FALSE(inbound_ring_->pop());
-    EXPECT_FALSE(Receive(true, std::chrono::milliseconds(100)));
+    EXPECT_FALSE(peer.receive(true, std::chrono::milliseconds(100)));
 }
 
 TEST_F(ServerTest, HandlesSeveralPacketsInOneSegment) {
-    std::vector<std::byte> segment = LoginBytes();
+    TcpPeer peer = Connect(50031);
+    std::vector<std::byte> segment = LoginBytes("S50031");
     const std::vector<std::byte> data = DataBytes(Enter(1, 'B', 500, 1'502'500));
     segment.insert(segment.end(), data.begin(), data.end());
+    ASSERT_TRUE(peer.send(segment));
 
-    ASSERT_TRUE(SendSegment(segment, 50031));
-
-    const auto login = Receive();
-    ASSERT_TRUE(login);
-    EXPECT_EQ(login->type, SoupPacketType::LOGIN_ACCEPTED);
+    EXPECT_TRUE(Accepted(peer.receive()));
     const auto request = EngineReceive();
     ASSERT_TRUE(request);
     EXPECT_EQ(request->type, EngineRequestType::NEW);
 }
 
-TEST_F(ServerTest, IdleSessionGetsServerHeartbeats) {
-    constexpr uint16_t kPort = 50041;
-    ASSERT_TRUE(Login(kPort));
+TEST_F(ServerTest, ReassemblesPacketsSplitAcrossSegments) {
+    TcpPeer peer = Connect(50032);
+    std::vector<std::byte> stream = LoginBytes("S50032");
+    const std::vector<std::byte> data = DataBytes(Enter(1, 'B', 500, 1'502'500));
+    const size_t data_at = stream.size();
+    stream.insert(stream.end(), data.begin(), data.end());
 
-    // Earlier tests' sessions are still logged in and heartbeating too.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
-    std::optional<Reply> heartbeat;
-    while (!heartbeat && std::chrono::steady_clock::now() < deadline) {
-        auto reply = Receive(/*skip_heartbeats=*/false, std::chrono::milliseconds(100));
-        if (reply && reply->transport.dst_port == kPort) heartbeat = std::move(reply);
+    // Cut mid-length-field, mid-login, across the login/data boundary, and mid-data.
+    const std::array<size_t, 6> cuts{0, 1, 20, data_at + 7, stream.size() - 3, stream.size()};
+    const std::span<const std::byte> bytes{stream};
+    for (size_t i = 0; i + 1 < cuts.size(); ++i) {
+        ASSERT_TRUE(peer.send(bytes.subspan(cuts[i], cuts[i + 1] - cuts[i])));
     }
+
+    EXPECT_TRUE(Accepted(peer.receive()));
+    const auto request = EngineReceive();
+    ASSERT_TRUE(request);
+    EXPECT_EQ(request->type, EngineRequestType::NEW);
+    EXPECT_EQ(request->quantity, 500u);
+}
+
+TEST_F(ServerTest, OversizedPacketEndsTheConnection) {
+    TcpPeer peer = Connect(50033);
+    ASSERT_TRUE(Login(peer, "S50033"));
+
+    // Announces 4000 bytes and sends a few: more than a client packet may be.
+    std::vector<std::byte> start(16, std::byte{'x'});
+    start[0] = std::byte{0x0F};
+    start[1] = std::byte{0xA0};
+    start[2] = std::byte{'U'};
+    ASSERT_TRUE(peer.send(start));
+    EXPECT_TRUE(peer.wait_closed());
+}
+
+TEST_F(ServerTest, IdleSessionGetsServerHeartbeats) {
+    TcpPeer peer = Connect(50041);
+    ASSERT_TRUE(Login(peer, "S50041"));
+
+    const auto heartbeat = peer.receive(/*skip_heartbeats=*/false, std::chrono::milliseconds(1500));
     ASSERT_TRUE(heartbeat);
     EXPECT_EQ(heartbeat->type, SoupPacketType::SERVER_HEARTBEAT);
 }
 
-TEST_F(ServerTest, NothingIsDeliveredAfterLogout) {
-    constexpr uint16_t kPort = 50051;
-    ASSERT_TRUE(Login(kPort));
-    ASSERT_TRUE(Send(Enter(1, 'B', 500, 1'502'500), kPort));
+TEST_F(ServerTest, ClientHeartbeatsKeepASessionAlive) {
+    TcpPeer peer = Connect(50042);
+    ASSERT_TRUE(Login(peer, "S50042"));
+
+    // Past the idle timeout, heartbeating every half second.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(SOUP_IDLE_TIMEOUT_MS + 1000);
+    while (std::chrono::steady_clock::now() < until) {
+        ASSERT_TRUE(peer.send(EmptyBytes(SoupPacketType::CLIENT_HEARTBEAT)));
+        peer.receive(false, std::chrono::milliseconds(500));
+    }
+    EXPECT_FALSE(peer.fin_received());
+}
+
+TEST_F(ServerTest, SilentClientIsDisconnected) {
+    TcpPeer peer = Connect(50043);
+    ASSERT_TRUE(Login(peer, "S50043"));
+    EXPECT_TRUE(peer.wait_closed(std::chrono::milliseconds(SOUP_IDLE_TIMEOUT_MS + 1000)));
+}
+
+TEST_F(ServerTest, ConnectionThatNeverLogsInIsDropped) {
+    TcpPeer peer = Connect(50044);
+    EXPECT_TRUE(peer.wait_closed(std::chrono::milliseconds(SOUP_LOGIN_TIMEOUT_MS + 1000)));
+}
+
+TEST_F(ServerTest, LogoutClosesTheConnection) {
+    TcpPeer peer = Connect(50051);
+    ASSERT_TRUE(Login(peer, "S50051"));
+    ASSERT_TRUE(peer.send(EmptyBytes(SoupPacketType::LOGOUT_REQUEST)));
+    EXPECT_TRUE(peer.wait_closed());
+}
+
+TEST_F(ServerTest, SecondConcurrentLoginIsRejected) {
+    TcpPeer first = Connect(50061);
+    ASSERT_TRUE(Login(first, "S50061"));
+
+    // Same session, case-insensitively.
+    TcpPeer second = Connect(50062);
+    ASSERT_TRUE(second.send(LoginBytes("s50061")));
+    const auto reply = second.receive();
+    ASSERT_TRUE(reply);
+    ASSERT_EQ(reply->type, SoupPacketType::LOGIN_REJECTED);
+    EXPECT_EQ(static_cast<char>(reply->payload[0]), soup_reject::kNotAuthorized);
+    EXPECT_FALSE(first.fin_received());
+}
+
+//=============================================================================
+// Re-login and replay
+//=============================================================================
+
+TEST_F(ServerTest, ReloginResumesTheSessionAndReplaysWhatWasMissed) {
+    TcpPeer first = Connect(50101);
+    ASSERT_TRUE(Login(first, "S50101"));
+    ASSERT_TRUE(Send(first, Enter(1, 'B', 1'000, 1'502'500)));
     const auto request = EngineReceive();
     ASSERT_TRUE(request);
+    Accept(*request);
+    const auto accepted = first.receive();
+    ASSERT_TRUE(accepted);
+    ASSERT_EQ(Ouch(*accepted).message_type, OutboundOuchMessageType::ORDER_ACCEPTED); // sequence 1
 
-    std::vector<std::byte> logout(8);
-    logout.resize(encode_soup_empty(SoupPacketType::LOGOUT_REQUEST, logout));
-    ASSERT_TRUE(SendSegment(logout, kPort));
+    // Gone; meanwhile the resting order trades twice.
+    ASSERT_TRUE(first.send_rst());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Execute(*request, 1);
+    Execute(*request, 2);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    EngineSend(EngineEvent{.order_id = request->order_id, .client_id = request->client_id, .price = 15'025,
-                           .quantity = 500, .type = EngineEventType::ACCEPTED});
-    EXPECT_FALSE(Receive(true, std::chrono::milliseconds(200)));
+    TcpPeer second = Connect(50102);
+    const auto login = Login(second, "S50101", /*sequence=*/2);
+    ASSERT_TRUE(login);
+    EXPECT_EQ(login->sequence_number, 2u);
+    for (const uint64_t match : {1u, 2u}) {
+        const auto replayed = second.receive();
+        ASSERT_TRUE(replayed);
+        const OuchOutboundFrame ouch = Ouch(*replayed);
+        ASSERT_EQ(ouch.message_type, OutboundOuchMessageType::ORDER_EXECUTED);
+        EXPECT_EQ(ouch.order_executed.match_number, match);
+    }
+
+    // Same session: same ClientId, UserRefNums carry on.
+    ASSERT_TRUE(Send(second, Enter(2, 'B', 100, 1'502'500)));
+    const auto next = EngineReceive();
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->client_id, request->client_id);
+}
+
+TEST_F(ServerTest, ReloginFromOneReplaysEverything) {
+    TcpPeer first = Connect(50111);
+    ASSERT_TRUE(Login(first, "S50111"));
+    ASSERT_TRUE(Send(first, Enter(1, 'B', 1'000, 1'502'500)));
+    const auto request = EngineReceive();
+    ASSERT_TRUE(request);
+    Accept(*request);
+    ASSERT_TRUE(first.receive());
+    ASSERT_TRUE(first.send(EmptyBytes(SoupPacketType::LOGOUT_REQUEST)));
+    ASSERT_TRUE(first.wait_closed());
+
+    TcpPeer second = Connect(50112);
+    const auto login = Login(second, "S50111", 1);
+    ASSERT_TRUE(login);
+    EXPECT_EQ(login->sequence_number, 1u);
+    const auto replayed = second.receive();
+    ASSERT_TRUE(replayed);
+    EXPECT_EQ(Ouch(*replayed).message_type, OutboundOuchMessageType::ORDER_ACCEPTED);
+}
+
+TEST_F(ServerTest, ReloginWithZeroStartsAtTheNextMessage) {
+    TcpPeer first = Connect(50121);
+    ASSERT_TRUE(Login(first, "S50121"));
+    ASSERT_TRUE(Send(first, Enter(1, 'B', 1'000, 1'502'500)));
+    const auto request = EngineReceive();
+    ASSERT_TRUE(request);
+    Accept(*request);
+    ASSERT_TRUE(first.receive());
+    ASSERT_TRUE(first.send_rst());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    TcpPeer second = Connect(50122);
+    const auto login = Login(second, "S50121", /*sequence=*/0);
+    ASSERT_TRUE(login);
+    EXPECT_EQ(login->sequence_number, 2u);
+    EXPECT_FALSE(second.receive(true, std::chrono::milliseconds(100))); // nothing replayed
+}
+
+TEST_F(ServerTest, ReplayOlderThanTheLogHoldsIsRejected) {
+    TcpPeer first = Connect(50131);
+    ASSERT_TRUE(Login(first, "S50131"));
+    ASSERT_TRUE(Send(first, Enter(1, 'B', 10'000, 1'502'500)));
+    const auto request = EngineReceive();
+    ASSERT_TRUE(request);
+    ASSERT_TRUE(first.send_rst());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Far more than the 4 KiB log holds, while nobody is connected:
+    // sequence 1 is the Accepted, 2..201 the executions.
+    Accept(*request);
+    for (uint64_t match = 1; match <= 200; ++match) Execute(*request, match);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    TcpPeer second = Connect(50132);
+    ASSERT_TRUE(second.send(LoginBytes("S50131", 1)));
+    const auto reply = second.receive();
+    ASSERT_TRUE(reply);
+    ASSERT_EQ(reply->type, SoupPacketType::LOGIN_REJECTED);
+    EXPECT_EQ(static_cast<char>(reply->payload[0]), soup_reject::kSessionNotAvailable);
+    ASSERT_TRUE(second.wait_closed());
+
+    // What's still held replays.
+    TcpPeer third = Connect(50133);
+    const auto login = Login(third, "S50131", 195);
+    ASSERT_TRUE(login);
+    EXPECT_EQ(login->sequence_number, 195u);
+    for (uint64_t match = 194; match <= 200; ++match) {
+        const auto replayed = third.receive();
+        ASSERT_TRUE(replayed);
+        EXPECT_EQ(Ouch(*replayed).order_executed.match_number, match);
+    }
+}
+
+TEST_F(ServerTest, ClientThatFallsAWholeLogBehindIsDisconnected) {
+    TcpPeer peer = Connect(50141);
+    ASSERT_TRUE(Login(peer, "S50141"));
+    ASSERT_TRUE(Send(peer, Enter(1, 'B', 10'000, 1'502'500)));
+    const auto request = EngineReceive();
+    ASSERT_TRUE(request);
+    // A zero window: the server can't send it anything, so it all backs up.
+    ASSERT_TRUE(peer.set_window(0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    Accept(*request);
+    for (uint64_t match = 1; match <= 200; ++match) Execute(*request, match);
+    EXPECT_TRUE(peer.wait_closed());
 }
 
 //=============================================================================
@@ -277,9 +451,9 @@ TEST_F(ServerTest, NothingIsDeliveredAfterLogout) {
 //=============================================================================
 
 TEST_F(ServerTest, EnterIsTranslatedAndAcceptedBackToTheClient) {
-    constexpr uint16_t kPort = 50101;
-    ASSERT_TRUE(Login(kPort));
-    ASSERT_TRUE(Send(Enter(1, 'B', 500, 1'502'500), kPort));
+    TcpPeer peer = Connect(50201);
+    ASSERT_TRUE(Login(peer, "S50201"));
+    ASSERT_TRUE(Send(peer, Enter(1, 'B', 500, 1'502'500)));
 
     const auto request = EngineReceive();
     ASSERT_TRUE(request);
@@ -288,19 +462,12 @@ TEST_F(ServerTest, EnterIsTranslatedAndAcceptedBackToTheClient) {
     EXPECT_EQ(request->quantity, 500u);
     EXPECT_NE(request->recv_tsc, 0u);
 
-    EngineSend(EngineEvent{.order_id = request->order_id, .client_id = request->client_id, .price = 15'025,
-                           .quantity = 500, .type = EngineEventType::ACCEPTED});
+    Accept(*request);
 
-    const auto reply = Receive();
+    const auto reply = peer.receive();
     ASSERT_TRUE(reply);
-    // Back where the order came from, from where it was sent to.
-    EXPECT_EQ(reply->src.ip, kServer.ip);
-    EXPECT_EQ(reply->dst.ip, kClient.ip);
-    EXPECT_EQ(reply->transport.src_port, kServerPort);
-    EXPECT_EQ(reply->transport.dst_port, kPort);
-
     ASSERT_EQ(reply->type, SoupPacketType::SEQUENCED_DATA);
-    const OuchOutboundFrame ouch = reply->ouch();
+    const OuchOutboundFrame ouch = Ouch(*reply);
     ASSERT_EQ(ouch.message_type, OutboundOuchMessageType::ORDER_ACCEPTED);
     EXPECT_EQ(ouch.order_accepted.user_ref_num, 1u);
     EXPECT_EQ(ouch.order_accepted.order_reference_number, request->order_id);
@@ -310,9 +477,9 @@ TEST_F(ServerTest, EnterIsTranslatedAndAcceptedBackToTheClient) {
 }
 
 TEST_F(ServerTest, OneLatencySamplePerAnsweredRequest) {
-    constexpr uint16_t kPort = 50401;
-    ASSERT_TRUE(Login(kPort));
-    ASSERT_TRUE(Send(Enter(1, 'B', 500, 1'502'500), kPort));
+    TcpPeer peer = Connect(50211);
+    ASSERT_TRUE(Login(peer, "S50211"));
+    ASSERT_TRUE(Send(peer, Enter(1, 'B', 500, 1'502'500)));
     const auto request = EngineReceive();
     ASSERT_TRUE(request);
 
@@ -327,25 +494,23 @@ TEST_F(ServerTest, OneLatencySamplePerAnsweredRequest) {
     accepted.engine_pop_tsc  = __rdtsc();
     accepted.engine_push_tsc = __rdtsc();
     EngineSend(accepted);
-    EngineSend(EngineEvent{.order_id = request->order_id, .match_number = 1, .client_id = request->client_id,
-                           .price = 15'025, .quantity = 100, .type = EngineEventType::EXECUTED,
-                           .reason = engine_reason::kAddedLiquidity});
+    Execute(*request, 1, 100);
 
-    ASSERT_TRUE(Receive());
-    ASSERT_TRUE(Receive());
-    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // recorded after the burst returns
+    ASSERT_TRUE(peer.receive());
+    ASSERT_TRUE(peer.receive());
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // recorded after the send returns
     EXPECT_EQ(Latency().samples_seen(), before + 1);
 }
 
 TEST_F(ServerTest, InvalidEnterIsRejectedWithoutReachingTheEngine) {
-    constexpr uint16_t kPort = 50201;
-    ASSERT_TRUE(Login(kPort));
-    ASSERT_TRUE(Send(Enter(1, 'B', 0, 1'502'500), kPort));
+    TcpPeer peer = Connect(50221);
+    ASSERT_TRUE(Login(peer, "S50221"));
+    ASSERT_TRUE(Send(peer, Enter(1, 'B', 0, 1'502'500)));
 
-    const auto reply = Receive();
+    const auto reply = peer.receive();
     ASSERT_TRUE(reply);
     ASSERT_EQ(reply->type, SoupPacketType::SEQUENCED_DATA);
-    const OuchOutboundFrame ouch = reply->ouch();
+    const OuchOutboundFrame ouch = Ouch(*reply);
     ASSERT_EQ(ouch.message_type, OutboundOuchMessageType::ORDER_REJECTED);
     EXPECT_EQ(ouch.order_rejected.user_ref_num, 1u);
     EXPECT_EQ(ouch.order_rejected.reason, ouch_reject::kInvalidQuantity);
@@ -353,23 +518,21 @@ TEST_F(ServerTest, InvalidEnterIsRejectedWithoutReachingTheEngine) {
 }
 
 TEST_F(ServerTest, FillsAreRoutedToEachCounterparty) {
-    constexpr uint16_t kSellerPort = 50301;
-    constexpr uint16_t kBuyerPort  = 50302;
-    ASSERT_TRUE(Login(kSellerPort));
-    ASSERT_TRUE(Login(kBuyerPort));
+    TcpPeer seller = Connect(50231);
+    TcpPeer buyer = Connect(50232);
+    ASSERT_TRUE(Login(seller, "S50231"));
+    ASSERT_TRUE(Login(buyer, "S50232"));
 
-    ASSERT_TRUE(Send(Enter(1, 'S', 100, 1'500'000), kSellerPort));
+    ASSERT_TRUE(Send(seller, Enter(1, 'S', 100, 1'500'000)));
     const auto sell = EngineReceive();
     ASSERT_TRUE(sell);
-    ASSERT_TRUE(Send(Enter(1, 'B', 100, 1'500'000), kBuyerPort));
+    ASSERT_TRUE(Send(buyer, Enter(1, 'B', 100, 1'500'000)));
     const auto buy = EngineReceive();
     ASSERT_TRUE(buy);
     ASSERT_NE(sell->client_id, buy->client_id); // separate sessions
 
-    for (const EngineRequest &req : {*sell, *buy}) {
-        EngineSend(EngineEvent{.order_id = req.order_id, .client_id = req.client_id, .price = req.price,
-                               .quantity = req.quantity, .type = EngineEventType::ACCEPTED});
-    }
+    Accept(*sell);
+    Accept(*buy);
     EngineSend(EngineEvent{.order_id = buy->order_id, .match_number = 1, .client_id = buy->client_id,
                            .price = 15'000, .quantity = 100, .type = EngineEventType::EXECUTED,
                            .reason = engine_reason::kRemovedLiquidity});
@@ -377,26 +540,16 @@ TEST_F(ServerTest, FillsAreRoutedToEachCounterparty) {
                            .price = 15'000, .quantity = 100, .type = EngineEventType::EXECUTED,
                            .reason = engine_reason::kAddedLiquidity});
 
-    std::vector<Reply> replies;
-    while (replies.size() < 4) {
-        auto reply = Receive();
-        ASSERT_TRUE(reply) << "only " << replies.size() << " replies";
-        replies.push_back(*reply);
-    }
-
-    int executions = 0;
-    for (const Reply &reply : replies) {
-        const OuchOutboundFrame ouch = reply.ouch();
-        if (ouch.message_type != OutboundOuchMessageType::ORDER_EXECUTED) continue;
-        ++executions;
+    for (const auto &[peer, liquidity] : {std::pair{&buyer, 'R'}, std::pair{&seller, 'A'}}) {
+        const auto ack = peer->receive();
+        ASSERT_TRUE(ack);
+        EXPECT_EQ(Ouch(*ack).message_type, OutboundOuchMessageType::ORDER_ACCEPTED);
+        const auto fill = peer->receive();
+        ASSERT_TRUE(fill);
+        const OuchOutboundFrame ouch = Ouch(*fill);
+        ASSERT_EQ(ouch.message_type, OutboundOuchMessageType::ORDER_EXECUTED);
         EXPECT_EQ(ouch.order_executed.execution_price, 1'500'000u);
         EXPECT_EQ(ouch.order_executed.match_number, 1u);
-        if (reply.transport.dst_port == kBuyerPort) {
-            EXPECT_EQ(ouch.order_executed.liquidity_flag, 'R');
-        } else {
-            EXPECT_EQ(reply.transport.dst_port, kSellerPort);
-            EXPECT_EQ(ouch.order_executed.liquidity_flag, 'A');
-        }
+        EXPECT_EQ(ouch.order_executed.liquidity_flag, liquidity);
     }
-    EXPECT_EQ(executions, 2);
 }

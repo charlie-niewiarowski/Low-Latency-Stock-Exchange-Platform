@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -209,11 +210,14 @@ void LoadGenerator::handleConnect(ClientState& cs) {
     #endif
     epollMod(cs, EPOLLIN);   // switch to EPOLLIN only; writes go direct via send()
 
+    char username[7];
+    std::snprintf(username, sizeof(username), "%s%04u", SOUP_USERNAME_PREFIX,
+                  static_cast<unsigned>(cs.client_id % 10'000));
     const SoupLoginRequest login{
-        .username                  = wire::alpha<6>(SOUP_USERNAME),
+        .username                  = wire::alpha<6>(username),
         .password                  = wire::alpha<10>(SOUP_PASSWORD),
         .requested_session         = wire::alpha<10>(""),
-        .requested_sequence_number = 1,
+        .requested_sequence_number = cs.next_sequence,
     };
     std::array<std::byte, kSoupHeaderLen + kSoupLoginRequestLen> packet{};
     encode_soup_login_request(login, packet);
@@ -247,7 +251,12 @@ void LoadGenerator::handleReadable(ClientState& cs) {
 
 bool LoadGenerator::handleSoupPacket(ClientState& cs, const SoupPacket& packet) {
     switch (packet.type) {
-        case SoupPacketType::LOGIN_ACCEPTED:
+        case SoupPacketType::LOGIN_ACCEPTED: {
+            const std::optional<SoupLoginAccepted> accepted = decode_soup_login_accepted(packet.payload);
+            if (!accepted) return false;
+            // Where the exchange starts sending from: what was asked for, or
+            // its next new message if that's sooner.
+            cs.next_sequence = accepted->sequence_number;
             cs.logged_in = true;
             // Only a successful login resets backoff: a server that accepts the
             // TCP connection but rejects every login must not get a reconnect spin.
@@ -256,6 +265,7 @@ bool LoadGenerator::handleSoupPacket(ClientState& cs, const SoupPacket& packet) 
             std::fprintf(stderr, "[LOGIN] cid:%-6u :: accepted\n", static_cast<unsigned>(cs.client_id));
             #endif
             return true;
+        }
 
         case SoupPacketType::LOGIN_REJECTED:
             #if LOGGING
@@ -266,6 +276,7 @@ bool LoadGenerator::handleSoupPacket(ClientState& cs, const SoupPacket& packet) 
 
         case SoupPacketType::SEQUENCED_DATA: {
             if (!cs.logged_in) return false; // data before Login Accepted violates the protocol
+            ++cs.next_sequence;
             const OuchOutboundFrame msg = decode_outbound_ouch(packet.payload);
             if (msg.message_type == OutboundOuchMessageType::NONE) {
                 #if LOGGING
@@ -456,7 +467,10 @@ void LoadGenerator::reconnect(ClientState& cs) {
     ::close(cs.fd);
     cs.fd = -1;
     cs.logged_in = false;
-    // Pending acks will never arrive; correct the in-flight counter.
+    // Answers to the Enters that reached the exchange come back in the
+    // re-login's replay; the rest never will, and there's no telling which
+    // is which. Start the pipeline afresh: a replayed answer to an older
+    // Enter then finds no slot to free (see handleOuch).
     cs.orders_in_flight -= static_cast<int64_t>(cs.acks_pending);
     cs.acks_pending = 0;
 

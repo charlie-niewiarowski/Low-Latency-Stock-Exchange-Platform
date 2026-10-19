@@ -62,13 +62,43 @@ set(SERVER_TEST_INCLUDES
 
 add_executable(server-tests ${SERVER_TEST_SOURCES})
 target_include_directories(server-tests PRIVATE ${SERVER_TEST_INCLUDES})
-# TESTING=1 switches Server's EAL bring-up (server.cpp) to a software-only
-# vdev instead of assuming a real hugepage-backed, PCI-bound NIC.
-target_compile_definitions(server-tests PRIVATE TESTING=1)
+# TESTING=1 opens up Server to the test fixture and leaves its threads
+# unpinned. The SoupBinTCP limits shrink so replay-log overflow and the
+# login/idle timeouts can be exercised in a test's time.
+target_compile_definitions(server-tests PRIVATE
+        TESTING=1
+        SOUP_REPLAY_BYTES=4096
+        SOUP_IDLE_TIMEOUT_MS=2000
+        SOUP_LOGIN_TIMEOUT_MS=2000)
 target_link_libraries(server-tests PRIVATE infra dpdk_lib absl::flat_hash_map hdr_histogram_static GTest::gtest_main)
 # Each discovered test is its own process, and two EALs at once collide on
 # DPDK's runtime files: serialize everything that brings one up.
 gtest_discover_tests(server-tests PROPERTIES RESOURCE_LOCK dpdk_eal)
+
+# ── exchange over tap ───────────────────────────────────────────────────────
+# Server on a net_tap port plus the real Engine, against kernel sockets in the
+# test process. Needs CAP_NET_ADMIN to create the tap interface; without it the
+# binary exits 77, which ctest reports as skipped. One ctest entry for the
+# binary, not one per case: each case would otherwise bring up its own EAL and
+# tap device. Run it alone with `ctest -L privileged`, under sudo or
+# `unshare -rnm` (see tap_e2e_test.cpp).
+
+add_executable(server-tap-tests
+        tap_e2e_test.cpp
+        ${EXCHANGE_SRC}/server/src/server.cpp
+        ${EXCHANGE_SRC}/server/src/order_entry.cpp
+        ${EXCHANGE_SRC}/server/src/ouch_responder.cpp
+        ${EXCHANGE_SRC}/engine/src/engine.cpp
+        ${EXCHANGE_SRC}/engine/src/orderbook.cpp
+)
+target_include_directories(server-tap-tests PRIVATE ${SERVER_TEST_INCLUDES} ${EXCHANGE_SRC}/engine/include)
+target_compile_definitions(server-tap-tests PRIVATE TESTING=1)
+target_link_libraries(server-tap-tests PRIVATE infra dpdk_lib absl::flat_hash_map hdr_histogram_static GTest::gtest)
+add_test(NAME server-tap-tests COMMAND server-tap-tests)
+set_tests_properties(server-tap-tests PROPERTIES
+        LABELS privileged
+        SKIP_RETURN_CODE 77
+        RESOURCE_LOCK dpdk_eal)
 
 # ── proto ────────────────────────────────────────────────────────────────────
 # Pure OUCH/ITCH wire codecs (ouch_proto.hpp/itch_proto.hpp, header-only in
@@ -85,12 +115,13 @@ gtest_discover_tests(clock-tests)
 
 # ── gateway ──────────────────────────────────────────────────────────────────
 # The server's protocol halves -- OrderEntry (OUCH -> engine), OuchResponder
-# (engine -> OUCH) and validation.hpp -- have no DPDK dependency, so they're
+# (engine -> OUCH), SessionLog (replay) and validation.hpp -- have no DPDK dependency, so they're
 # tested without bringing up an EAL.
 
 add_executable(gateway-tests
         order_entry_tests.cpp
         ouch_responder_tests.cpp
+        session_log_tests.cpp
         ${EXCHANGE_SRC}/server/src/order_entry.cpp
         ${EXCHANGE_SRC}/server/src/ouch_responder.cpp
 )
@@ -100,7 +131,7 @@ gtest_discover_tests(gateway-tests)
 
 # ── client ───────────────────────────────────────────────────────────────────
 # The real LoadGenerator against an in-test SoupBinTCP/OUCH server on kernel
-# loopback (EXCHANGE_HOST:EXCHANGE_PORT from the client's config.hpp).
+# loopback (EXCHANGE_HOST, overridden to 127.0.0.1, : EXCHANGE_PORT).
 
 find_package(Threads REQUIRED)
 add_executable(client-tests
@@ -111,6 +142,7 @@ target_include_directories(client-tests PRIVATE
         ${ROOT_SRC}/client/include
         ${ROOT_SRC}/client/config
 )
+target_compile_definitions(client-tests PRIVATE EXCHANGE_HOST="127.0.0.1")
 target_link_libraries(client-tests PRIVATE infra Threads::Threads GTest::gtest_main)
 # Every test binds the same port.
 gtest_discover_tests(client-tests PROPERTIES RESOURCE_LOCK exchange_port)

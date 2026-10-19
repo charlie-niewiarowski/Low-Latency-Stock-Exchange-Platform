@@ -28,6 +28,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -218,8 +219,58 @@ class Runner:
         raise NotImplementedError
 
 
+# Both binaries run from one shell: the exchange first, the client once its
+# tap interface is up, each stopped with SIGINT (the exchange prints its
+# histograms on the way out), then every output printed between delimiters.
+_D_CL_ERR = "@@@CLIENT_STDERR@@@"
+_D_EX_OUT = "@@@EXCHANGE_STDOUT@@@"
+_D_EX_ERR = "@@@EXCHANGE_STDERR@@@"
+_D_END    = "@@@END@@@"
+
+
+def _pair_script(exchange_bin: str, client_bin: str, out_dir: str,
+                 num_clients: int, seed: int | None, duration: float) -> str:
+    seed_arg = f" {seed}" if seed is not None else ""
+    return (
+        f"{exchange_bin} >{out_dir}/ex.out 2>{out_dir}/ex.err & XPID=$!; "
+        "sleep 1.5; "  # EAL + tap bring-up; the client's reconnect backoff covers any slack
+        f"{client_bin} {num_clients}{seed_arg} "
+        f">{out_dir}/cl.out 2>{out_dir}/cl.err & CPID=$!; "
+        f"sleep {duration}; "
+        "kill -INT $CPID 2>/dev/null; wait $CPID 2>/dev/null; "
+        "sleep 0.5; "
+        "kill -INT $XPID 2>/dev/null; wait $XPID 2>/dev/null; "
+        f"echo '{_D_CL_ERR}'; cat {out_dir}/cl.err; "
+        f"echo '{_D_EX_OUT}'; cat {out_dir}/ex.out; "
+        f"echo '{_D_EX_ERR}'; cat {out_dir}/ex.err; "
+        f"echo '{_D_END}'"
+    )
+
+
+def _parse_pair_output(r: subprocess.CompletedProcess) -> RunResult:
+    out = r.stdout.decode(errors="replace")
+    if _D_END not in out:
+        raise RuntimeError("run produced no delimited output:\n"
+                           + r.stderr.decode(errors="replace")[-500:])
+    return RunResult(
+        client_stderr=_slice(out, _D_CL_ERR, _D_EX_OUT),
+        exchange_stdout=_slice(out, _D_EX_OUT, _D_EX_ERR),
+        exchange_stderr=_slice(out, _D_EX_ERR, _D_END),
+    )
+
+
 class NativeRunner(Runner):
-    """Runs the release binaries directly (real latency on Linux x86-64)."""
+    """
+    Runs the release binaries directly (real latency on Linux x86-64).
+
+    The exchange creates its own kernel interface (net_tap, dpdktap0 at
+    10.77.0.1 <-> 10.77.0.2), which needs CAP_NET_ADMIN. As root the pair runs
+    in the host's network namespace; otherwise both run inside a throwaway
+    user + network namespace (`unshare -rnm`), where the client's compiled-in
+    10.77.0.2 reaches the exchange just the same. There SCHED_FIFO isn't
+    permitted, so threads fall back to SCHED_OTHER -- run as root for
+    representative tail latency.
+    """
     name = "native"
     emulated = False
 
@@ -231,54 +282,30 @@ class NativeRunner(Runner):
               f"-j{os.cpu_count() or 4}"])
 
     def run_pair(self, num_clients, seed, duration) -> RunResult:
-        xproc = subprocess.Popen([str(EXCHANGE_BIN)],
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(0.5)
-        if xproc.poll() is not None:
-            raise RuntimeError("exchange exited immediately — port already in use?")
-
-        cmd = [str(CLIENT_BIN), str(num_clients)]
-        if seed is not None:
-            cmd.append(str(seed))
-        cproc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-        time.sleep(duration)
-
-        cproc.send_signal(signal.SIGTERM)
-        try:
-            _, c_err = cproc.communicate(timeout=15)
-        except subprocess.TimeoutExpired:
-            cproc.kill()
-            _, c_err = cproc.communicate()
-
-        xproc.send_signal(signal.SIGTERM)
-        try:
-            x_out, x_err = xproc.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            xproc.kill()
-            x_out, x_err = xproc.communicate()
-
-        time.sleep(1)  # let the port leave TIME_WAIT
-        return RunResult(
-            client_stderr=c_err.decode(errors="replace"),
-            exchange_stdout=x_out.decode(errors="replace"),
-            exchange_stderr=x_err.decode(errors="replace"),
-        )
-
-
-_D_CL_ERR = "@@@CLIENT_STDERR@@@"
-_D_EX_OUT = "@@@EXCHANGE_STDOUT@@@"
-_D_EX_ERR = "@@@EXCHANGE_STDERR@@@"
-_D_END    = "@@@END@@@"
+        with tempfile.TemporaryDirectory(prefix="bench-") as out_dir:
+            script = _pair_script(str(EXCHANGE_BIN), str(CLIENT_BIN), out_dir,
+                                  num_clients, seed, duration)
+            if os.geteuid() == 0:
+                cmd = ["sh", "-c", script]
+            else:
+                # EAL (as namespace "root") wants a writable /var/run.
+                cmd = ["unshare", "-rnm", "sh", "-c",
+                       "mount -t tmpfs tmpfs /var/run && ip link set lo up && " + script]
+            # Tolerant of a nonzero rc (the kill/wait can propagate 130); we
+            # validate via the delimiters instead.
+            r = subprocess.run(cmd, cwd=REPO_ROOT, timeout=duration + 120,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return _parse_pair_output(r)
 
 
 class DockerRunner(Runner):
     """
-    Drives both binaries inside one `docker compose run --rm dev` shell, sharing
-    loopback so the client's compiled-in 127.0.0.1 reaches the exchange. Each
+    Drives both binaries inside one `docker compose run --rm dev` shell. Each
     process writes to the container-local /tmp (fast, no bind-mount lag); the
     outputs are then streamed back over the compose command's stdout between
     delimiters, so the host never depends on macOS bind-mount propagation.
+    (The image doesn't install DPDK yet, so the exchange can't be built there
+    -- see TODO.md.)
     """
     name = "docker"
 
@@ -299,37 +326,14 @@ class DockerRunner(Runner):
         self._compose(f'cmake --build build {tgt} -j"$(nproc)"', timeout=1800)
 
     def run_pair(self, num_clients, seed, duration) -> RunResult:
-        seed_arg = f" {seed}" if seed is not None else ""
-        script = (
-            "./build/exchange/exchange-release >/tmp/ex.out 2>/tmp/ex.err & XPID=$!; "
-            "sleep 0.7; "
-            f"./build/client/client-release {num_clients}{seed_arg} "
-            ">/tmp/cl.out 2>/tmp/cl.err & CPID=$!; "
-            f"sleep {duration}; "
-            "kill -INT $CPID 2>/dev/null; wait $CPID 2>/dev/null; "
-            "sleep 0.5; "
-            "kill -INT $XPID 2>/dev/null; wait $XPID 2>/dev/null; "
-            f"echo '{_D_CL_ERR}'; cat /tmp/cl.err; "
-            f"echo '{_D_EX_OUT}'; cat /tmp/ex.out; "
-            f"echo '{_D_EX_ERR}'; cat /tmp/ex.err; "
-            f"echo '{_D_END}'"
-        )
-        # Tolerant of a nonzero rc (the kill/wait can propagate 130); we validate
-        # via the delimiters instead.
+        script = _pair_script("./build/exchange/exchange-release", "./build/client/client-release",
+                              "/tmp", num_clients, seed, duration)
         r = subprocess.run(
             ["docker", "compose", "run", "--rm", "-T", "dev", "sh", "-c", script],
             cwd=REPO_ROOT, timeout=duration + 120,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        out = r.stdout.decode(errors="replace")
-        if _D_END not in out:
-            raise RuntimeError("docker run produced no delimited output:\n"
-                               + r.stderr.decode(errors="replace")[-500:])
-        return RunResult(
-            client_stderr=_slice(out, _D_CL_ERR, _D_EX_OUT),
-            exchange_stdout=_slice(out, _D_EX_OUT, _D_EX_ERR),
-            exchange_stderr=_slice(out, _D_EX_ERR, _D_END),
-        )
+        return _parse_pair_output(r)
 
 
 def _slice(text: str, start: str, end: str) -> str:

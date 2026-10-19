@@ -10,7 +10,7 @@ binaries are rebuilt back to DIAGNOSTICS=0 (unless --no-rebuild-after).
 
 Process manipulation: edit-and-restore DIAGNOSTICS (both configs, both rebuilds);
 optional EXPECTED_THROUGHPUT via --load (0 = closed-loop, the default, to push
-enough traffic past the 100k warm-up drop).
+enough traffic past the warm-up drop).
 
     python3 -m bench.scripts.stage_breakdown --clients 16 --duration 20
 """

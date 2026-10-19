@@ -3,10 +3,12 @@
 //
 // The real LoadGenerator against a minimal in-process SoupBinTCP + OUCH
 // exchange over kernel loopback (EXCHANGE_HOST:EXCHANGE_PORT, so that port
-// must be free while this runs). The mock checks the client's side of both
-// protocols -- login first, data only after Login Accepted, UserRefNums
-// strictly increasing, nothing undecodable -- and answers like the real
-// gateway would.
+// must be free while this runs; client-tests points it at loopback). The
+// mock checks the client's side of both protocols -- login first, data only
+// after Login Accepted, UserRefNums strictly increasing, nothing
+// undecodable, a re-login asking for the next unseen sequence number -- and
+// answers like the real gateway would, keeping each username's Sequenced
+// Data for replay.
 //
 
 #include "load_generator.hpp"
@@ -22,6 +24,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <map>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -35,7 +39,9 @@ public:
         NORMAL,      // accept logins, answer every message
         SILENT,      // accept logins, never answer orders
         REJECT_ALL,  // reject every login
+        FLAKY,       // like NORMAL, but drops each connection after kFlakyEnters Enters
     };
+    static constexpr int kFlakyEnters = 50;
 
     explicit MockExchange(const Mode mode) : mode_(mode) {
         listen_fd_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -65,12 +71,16 @@ public:
     std::atomic<int> replaces{0};
     std::atomic<int> client_heartbeats{0};
     std::atomic<int> violations{0};
+    std::atomic<int> usernames{0};       // distinct usernames that logged in
+    std::atomic<int> resumed_logins{0};  // logins asking to start past sequence 1
 
 private:
     struct Connection {
         int fd;
         std::vector<std::byte> buffer;
         bool logged_in = false;
+        std::string username;
+        int enters = 0;
         uint32_t last_user_ref_num = 0;
         uint64_t next_order_ref = 1;
     };
@@ -92,10 +102,7 @@ private:
             for (size_t i = 1; i < fds.size(); ++i) {
                 if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) read(connections_[i - 1]);
             }
-            std::erase_if(connections_, [](const Connection &c) {
-                if (c.fd >= 0) return false;
-                return true;
-            });
+            std::erase_if(connections_, [](const Connection &c) { return c.fd < 0; });
         }
     }
 
@@ -128,15 +135,36 @@ private:
         switch (packet.type) {
             case SoupPacketType::LOGIN_REQUEST: {
                 ++login_requests;
-                if (c.logged_in || !decode_soup_login_request(packet.payload)) ++violations;
+                const auto login = decode_soup_login_request(packet.payload);
+                if (c.logged_in || !login) {
+                    ++violations;
+                    return;
+                }
                 if (mode_ == Mode::REJECT_ALL) {
                     send(c, [](auto out) { return encode_soup_login_rejected(soup_reject::kNotAuthorized, out); });
                     return;
                 }
                 c.logged_in = true;
-                send(c, [](auto out) {
-                    return encode_soup_login_accepted({.session = soup_session_id("SIM"), .sequence_number = 1}, out);
+                c.username.assign(login->username.begin(), login->username.end());
+                const auto [it, is_new] = logs_.try_emplace(c.username);
+                if (is_new) ++usernames;
+                const std::vector<std::vector<std::byte>> &log = it->second;
+
+                // A client asks for the next message it hasn't seen: never 0
+                // (it always knows), never past what was sent.
+                const uint64_t sequence = login->requested_sequence_number;
+                if (sequence == 0 || sequence > log.size() + 1) {
+                    ++violations;
+                    return;
+                }
+                if (sequence > 1) ++resumed_logins;
+                send(c, [&](auto out) {
+                    return encode_soup_login_accepted({.session = soup_session_id("SIM"), .sequence_number = sequence},
+                                                      out);
                 });
+                for (size_t i = sequence - 1; i < log.size(); ++i) {
+                    ::send(c.fd, log[i].data(), log[i].size(), MSG_NOSIGNAL);
+                }
                 return;
             }
             case SoupPacketType::UNSEQUENCED_DATA:
@@ -162,6 +190,10 @@ private:
         switch (msg.message_type) {
             case InboundOuchMessageType::ENTER_ORDER: {
                 ++enters;
+                if (mode_ == Mode::FLAKY && ++c.enters > kFlakyEnters) {
+                    ::shutdown(c.fd, SHUT_RDWR); // gone mid-stream; read() reaps it
+                    return;
+                }
                 const OuchEnterOrder &e = msg.enter_order;
                 sequence(e.user_ref_num);
                 if (validation::check_enter(e, {.min = MIN_PRICE, .max = MAX_PRICE}).reject_reason != 0) {
@@ -204,7 +236,10 @@ private:
                 ++violations;
                 return;
         }
-        send(c, [&](auto out) { return encode_soup_sequenced(reply, out); });
+        std::vector<std::byte> packet(256);
+        packet.resize(encode_soup_sequenced(reply, packet));
+        ::send(c.fd, packet.data(), packet.size(), MSG_NOSIGNAL);
+        logs_[c.username].push_back(std::move(packet));
     }
 
     template <typename Encode>
@@ -218,6 +253,8 @@ private:
     int listen_fd_ = -1;
     bool listening_ = false;
     std::vector<Connection> connections_;
+    // Username -> every Sequenced Data packet sent it, for replay.
+    std::map<std::string, std::vector<std::vector<std::byte>>> logs_;
     std::jthread thread_;
 };
 
@@ -241,6 +278,7 @@ TEST(Client, TradesOverSoupBinTcpWithoutProtocolViolations) {
 
     EXPECT_EQ(exchange.violations.load(), 0);
     EXPECT_EQ(exchange.login_requests.load(), 2);
+    EXPECT_EQ(exchange.usernames.load(), 2); // a session each
     EXPECT_GT(exchange.enters.load(), 100);
     EXPECT_GT(exchange.cancels.load(), 0);
     EXPECT_GT(exchange.replaces.load(), 0);
@@ -279,4 +317,17 @@ TEST(Client, RejectedLoginBacksOffAndSendsNoOrders) {
     EXPECT_GE(exchange.login_requests.load(), 2); // retried
     EXPECT_LE(exchange.login_requests.load(), 6); // ...with backoff, not in a spin
     EXPECT_EQ(exchange.enters.load(), 0);
+}
+
+TEST(Client, ReconnectsResumeTheSessionWhereTheyLeftOff) {
+    MockExchange exchange{MockExchange::Mode::FLAKY};
+    ASSERT_TRUE(exchange.listening()) << "port " << EXCHANGE_PORT << " is taken";
+
+    const LoadGenerator::Stats stats = RunFor(1, std::chrono::milliseconds(800));
+
+    EXPECT_EQ(exchange.violations.load(), 0);
+    EXPECT_EQ(exchange.usernames.load(), 1);    // the same session every time
+    EXPECT_GE(exchange.resumed_logins.load(), 1); // asking for what it hadn't seen, not from 1
+    EXPECT_GT(exchange.enters.load(), MockExchange::kFlakyEnters);
+    EXPECT_EQ(stats.responses_err, 0u);
 }
