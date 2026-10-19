@@ -50,7 +50,9 @@ the outbound thread works through the previous batch. Places to look:
 - the inbound side's software checksum verification (`tcp_params::verify_checksums`). On
   the tap path the kernel has already checked every frame, so it could be off there.
 - encoding into scratch and then copying into the `SessionLog`, instead of encoding in place
-- `kOutboundBatch` (32 events per flush) against latency at low load
+- done: RPS on the tap (`TAP_RPS_CORE`) and `kOutboundBatch` 32 -> 512, together 607k -> 936k
+  req/s as root. Each tap write still costs ~6k kernel cycles; segments now average ~1230
+  of 1514 bytes
 - then `stage_breakdown` again, run as root so `SCHED_FIFO` and core pinning are in effect
 
 ## 4. DPDK in the Docker image

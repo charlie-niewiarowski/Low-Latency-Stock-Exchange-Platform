@@ -35,8 +35,12 @@ constexpr uint64_t kScanIntervalNs = 100'000'000;
 
 // Engine events the outbound thread takes before sending what they produced:
 // replies to one client in a batch share TCP segments, and the first reply
-// waits at most this many events for its send.
-constexpr size_t kOutboundBatch = 32;
+// waits at most this many events for its send. It only binds with a backlog
+// in the ring -- otherwise the batch ends when the ring runs dry -- and then
+// bigger means fewer, fuller segments (each one a write() on the tap path):
+// 32 -> 512 measured 678k -> 936k req/s, and low-load latency unchanged.
+// 2048 fills segments only slightly more (~1300 vs ~1230 bytes).
+constexpr size_t kOutboundBatch = 512;
 
 constexpr uint64_t kIdleTimeoutNs  = uint64_t{SOUP_IDLE_TIMEOUT_MS} * 1'000'000;
 constexpr uint64_t kLoginTimeoutNs = uint64_t{SOUP_LOGIN_TIMEOUT_MS} * 1'000'000;
