@@ -18,6 +18,7 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <string>
 #include <utility>
 
 namespace {
@@ -77,7 +78,7 @@ dpdk::port &bring_up_port(dpdk::runtime &runtime, const ServerNetwork &network) 
 
 ServerNetwork ServerNetwork::nic() {
     return ServerNetwork{
-        .eal = dpdk::runtime_params{.program_name = "exchange-server"},
+        .eal = dpdk::runtime_params{.program_name = "exchange-server", .core_list = std::to_string(EAL_CORE)},
         .rx_queues = 1,
         .tx_queues = 2,
         .polled_rx = {0},
@@ -95,6 +96,7 @@ ServerNetwork ServerNetwork::tap_interface(std::string iface) {
         // No hugepages or PCI needed: the tap PMD is a kernel interface.
         .eal = dpdk::runtime_params{
             .program_name = "exchange-server",
+            .core_list = std::to_string(EAL_CORE),
             .legacy_mem_mb = 256,
             .no_huge = true,
             .no_pci = true,
@@ -124,6 +126,7 @@ ServerNetwork ServerNetwork::loopback_test() {
     return ServerNetwork{
         .eal = dpdk::runtime_params{
             .program_name = "exchange-server",
+            .core_list = std::to_string(EAL_CORE),
             .legacy_mem_mb = 128,
             .no_huge = true,
             .no_pci = true,
@@ -162,6 +165,10 @@ try :
     inbound_ring_(std::move(inbound_ring)),
     outbound_ring_(std::move(outbound_ring))
 {
+    // DPDK puts its own service threads (interrupts, IPC, telemetry) on every
+    // core outside its lcore list -- i.e. the ones the matching and gateway
+    // threads are about to be pinned to. Keep them on the EAL's core instead.
+    pin_other_threads_to_core(EAL_CORE);
     tcp_.listen(network_.listen_port);
     for (const uint16_t queue : network_.polled_rx) {
         rx_queues_.push_back(dpdk_port_.claim_rx_queue(queue));
@@ -547,7 +554,6 @@ void Server::on_note_(const ServerNote &note) {
 
         case ServerNote::Kind::DISCONNECTED:
             close_(note.conn);
-            return;
     }
 }
 

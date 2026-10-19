@@ -6,6 +6,7 @@
 #define INFRA_PERF_H
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -59,6 +60,24 @@ inline void pin_to_core(const int core) {
         std::cerr << "pthread_setschedparam failed: " << strerror(rc)
                    << " (needs CAP_SYS_NICE or a raised RLIMIT_RTPRIO; falling back to SCHED_OTHER)"
                    << std::endl;
+    }
+}
+
+// Pins every other thread in this process to core -- for the threads a
+// library started that we never get a handle on (DPDK's interrupt, IPC and
+// telemetry threads). Call it while those are the only other threads.
+inline void pin_other_threads_to_core(const int core) {
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(core, &cpu_set);
+    const pid_t self = gettid();
+    std::error_code ec;
+    for (const auto &task : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        const auto tid = static_cast<pid_t>(std::strtol(task.path().filename().c_str(), nullptr, 10));
+        if (tid == self) continue;
+        if (sched_setaffinity(tid, sizeof(cpu_set), &cpu_set) != 0) {
+            std::cerr << "sched_setaffinity(" << tid << ") failed: " << strerror(errno) << std::endl;
+        }
     }
 }
 

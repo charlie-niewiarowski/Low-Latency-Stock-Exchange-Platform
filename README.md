@@ -147,6 +147,7 @@ All compile-time configuration lives in header files. A rebuild is required afte
 | `MAX_PRICE` | `100000` | Highest price the book holds; $1000.00 = 100000 cents |
 | `BOOK_SYMBOL` | `"SIM"` | Symbol the single book publishes ITCH under |
 | `BOOK_STOCK_LOCATE` | `1` | ITCH stock locate for that book |
+| `EAL_CORE` | `0` | The DPDK EAL's only lcore: the exchange's main thread and DPDK's own service threads run here |
 | `MATCHING_CORE` | `1` | CPU core the matching thread is pinned to |
 | `INBOUND_CORE` | `2` | CPU core the inbound gateway thread is pinned to |
 | `OUTBOUND_CORE` | `3` | CPU core the outbound gateway thread is pinned to |

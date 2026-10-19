@@ -29,6 +29,11 @@
 #define BOOK_SYMBOL "SIM"
 #define BOOK_STOCK_LOCATE 1
 
+// The EAL's only lcore: DPDK pins the thread that brings it up (the
+// exchange's main thread) here, along with its own service threads.
+// Without a core list it claims every core and starts an idle worker
+// thread on each.
+#define EAL_CORE 0
 #define MATCHING_CORE 1
 #define INBOUND_CORE 2
 #define OUTBOUND_CORE 3
