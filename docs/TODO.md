@@ -1,5 +1,3 @@
-# TODO
-
 Ranked by priority, highest first. Time-frames are rough estimates of focused work,
 including tests and docs.
 
